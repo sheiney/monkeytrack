@@ -1,9 +1,9 @@
 MonkeyTrack
 ===========
 
-Non-human primate oculomotor task control program for [CED Spike2 and Power1401 system](http://ced.co.uk/indexu.shtml) currently in use in the laboratory of Pablo Blazquez at Washington University School of Medicine. 
+Monkey oculomotor task control program for [CED Spike2 and Power1401 system](http://ced.co.uk/indexu.shtml) that is currently in use in the laboratory of [Pablo Blazquez](http://vor.wustl.edu/) at Washington University School of Medicine. This is a very mature program that is used for all experiments performed in the lab. It is currently maintained by Dr. Blazquez. 
 
-IMPORTANT: Please note that the requirements to use the software as-is are very specific so it is unlikely that you will be able to run the code out-of-the-box. Therefore the code is mostly provided for reference if you wish to develop your own oculomotor task control system with CED hardware. 
+IMPORTANT: Please note that the requirements to use the software as-is are very specific so it is unlikely that you will be able to run the code out-of-the-box. Therefore the code is mostly provided for reference if you wish to develop your own oculomotor task control system with CED hardware. If the code helps you please consider acknowledging the Blazquez Lab or citing [my dissertation](http://openscholarship.wustl.edu/etd/144/), which contains a section about the software in Chapter 2. 
 
 Copyright &copy; 2003 Shane Heiney
 
@@ -12,10 +12,10 @@ Requirements
 
 * Windows XP/7/8. 
 * Cambridge Electronic Design (CED) data acquisition system, including Spike2 version 6 or greater and a Power1401.
-* Mirror galvo system (+/- 5 V) with laser and laser driver to control brightness. 
+* Mirror galvo system (+/- 5 V) with laser and laser driver to control brightness with digital inputs. 
 * Two Kollmorgen servo motors (for optokinetic drum and vestibular table). 
 * Eye position measurement system capable of outputting analog signals proportional to horizontal and vertical eye position. 
-* Reward deliver system such as liquid reservoir and solenoid/pump. 
+* Reward delivery system such as liquid reservoir and solenoid/pump. 
 
 Overview
 --------
@@ -27,7 +27,7 @@ Overview
 * `include\uservars.s2s`: User-specific configuration file that defines certain constants and variables for a particular user/rig combination.
 * `analysisEnvironment.s2s`: Spike2 script that provides a pipeline for post-processing, analyzing, and exporting data acquired using MonkeyTrack. 
 
-The software shares features with other programs used in behaving monkey research but was written to work with the equipment used in the Blazquez lab. Briefly, the program generates all of the digital and analog signals required to control a mirror galvo system for moving a laser target that is projected in front of the monkey and two servomotors for rotating the monkey and an optokinetic drum. It operates by monitoring the monkey’s eye position relative to the laser target and rewarding the monkey for looking at the target as it moves around the screen according to the particular task being performed. The criterion for accepting that the monkey is correctly following the target is that the monkey’s eye position remains within an invisible "window", specified in degrees, that surrounds the target.
+The software shares features with other programs used in behaving monkey research but was written to work with the equipment used in the Blazquez Lab. Briefly, the program generates all of the digital and analog signals required to control a mirror galvo system for moving a laser target that is projected in front of the monkey and two servomotors for rotating the monkey and an optokinetic drum. It operates by monitoring the monkey’s eye position relative to the laser target and rewarding the monkey for looking at the target as it moves around the screen according to the particular task being performed. The criterion for accepting that the monkey is correctly following the target is that the monkey’s eye position remains within an invisible "window", specified in degrees, that surrounds the target.
 
 *Architecture of program*
 
@@ -49,7 +49,7 @@ The program was designed to be flexible, so new tasks can be added with relative
 6. Sinusoidal VOR with or without target at any displacement and frequency supported by the servomotor.
 7. Sinusoidal VOR suppression at any displacement and frequency supported by the servomotor.
 8. Sinusoidal optokinetic stimulation (OKS) and fixation during whole field stimulation (F-WFS) at any displacement and frequency supported by the servomotor.
-9. A predictive target interception task, wherein the monkey must make a saccade to location predicted by the motion of a pursuit target and optionally pursue the target after acquiring it.
+9. A predictive target interception task, wherein the monkey must make a saccade to a location predicted by the motion of a pursuit target and optionally pursue the target after acquiring it.
 
 Fixation and hold times of any duration can be specified by the user, with the option of randomizing the times. The sinusoidal tasks are generally run continuously, though a single trial option is available, and the monkey is rewarded for keeping its eye on the target for a period of time specified by the user. All other tasks are run on a trial-by-trial basis, with the option of pseudo-randomizing the target direction on each trial or having the monkey perform blocks of identical trials.
 
@@ -68,3 +68,14 @@ In addition to the task control interface, all functionality provided by Spike2 
 Throughout the development of the program a number of improvements were made to the reward system in order to facilitate training. The first is an option to automatically increment the reward size on each successful trial, up to a maximum of 10 consecutive good trials. After 10 successful trials the reward size resets to its base level. This addition was instrumental in increasing the perseverance of the squirrel monkeys. Another addition was inspired by the success of jackpot lotteries. The user specifies two reward sizes, one large one small, and a value indicating the number of trials out of 100 in which the large reward will be delivered. This encourages the monkey to keep working for small rewards in anticipation of the large reward and can extend the number of trials that a monkey performs before becoming satiated. Lastly, as part of the system for monitoring overall monkey performance, the program has the ability to monitor the cumulative volume of reward dispensed in an experimental session, allowing the investigator to adjust the reward size as needed to maximize the number of trials performed.
 
 Another improvement that was made throughout the program development was the addition of a second "task window" that can be set to a different size than the initial "fixation window". This allows the user to specify a strict requirement for the monkey to fixate the initial target position while giving some leniency in how closely the eye tracks the target during the performance of the task, e.g. so the monkey is still rewarded despite natural variability in the precision of the movement, and neurological problems such as hypometric or hypermetric eye movements can be studied while still rewarding the animal’s effort to perform the task.
+
+Further Reading
+---------------
+
+1. Heiney, Shane, "Roles Of Inhibitory Interneurons In Cerebellar Cortical Processing For Oculomotor Control" (2010). All Theses and Dissertations (ETDs). Paper 144.
+http://openscholarship.wustl.edu/etd/144
+2. Heine SA, Highstein SM, Blazquez PM (2010) Golgi Cells Operate as State-Specific Temporal Filters at the Input Stage of the Cerebellar Cortex. J Neurosci 30:17004–17014. 
+[[Pubmed]](http://www.ncbi.nlm.nih.gov/pubmed/21159970)
+3. Heiney SA, Blazquez PM (2011) Behavioral responses of trained squirrel and rhesus monkeys during oculomotor tasks. Exp brain Res 212:409–416. 
+[[Pubmed]](http://www.ncbi.nlm.nih.gov/pubmed/21656216)
+
