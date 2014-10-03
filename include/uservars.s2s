@@ -1,0 +1,65 @@
+'User-specific constant and variable declarations for training program
+
+const SeqFileRootDir$:="D:\\shane\\spike2\\task control\\";
+const ROOTBEHDIR$:="D:\\shane\\data\\behavior\\";
+const ROOTRECDIR$:="D:\\shane\\data\\recording\\";
+const ConfigDir$:="D:\\shane\\data\\";
+const SeqStepMS:=0.100;		'Sequencer step interval (ms) --> 10 KHz
+const RewMlsPerMS:=1.14; 'Prior to 7/30/2010: 0.98, After 7/30/2010: 0.95, After 10/13/2010: 1.14
+const StepsPerEIWLoop:=30;      ' Number of steps in EIW check loop
+
+const DegPerHLzVolt:=9.85;  'Changed from 9.32 on 11/20/2010
+const DegPerVLzVolt:=9.52;  'Changed from 10.35 on 11/20/2010
+
+'NOTE: laser calibration values changed on 10/30/2010
+var BitsPerHLzDeg:=2147483647/5/DegPerHLzVolt; 'signed 32-bits for +/-35 deg HLzr (46.6 deg for 5 Volts)
+var BitsPerSineHLzDeg:=32768/5/DegPerHLzVolt; 'unsigned 16-bits for +/-35 deg HLzr
+var BitsPerVLzDeg:=2147483647/5/DegPerVLzVolt; 'signed 32-bits for +/-35 deg VLzr
+var BitsPerSineVLzDeg:=32768/5/DegPerVLzVolt; 'unsigned 16-bits for +/-35 deg VLzr
+
+var BitsPerLzDeg:=2147483647/5/DegPerVLzVolt; 'signed 32-bits for +/-35 deg both Lzrs
+
+
+'These two vars are treated like constants for calculations, but we need to be able to change them during execution
+'NOT CURRENTLY USED
+var dChrToLz:=20;       'Distance of chair axis to laser/mirror axis (cm)
+var dChrToScreen:=50;    'Distance of chair axis to screen (cm)
+
+'NOTE: laser calibration values changed on 10/30/2010 and 11/20/2010
+'Set these vars based on above constants
+var HLzScale:=DegPerHLzVolt;
+var VLzScale:=DegPerVLzVolt;
+
+
+'Kollmorgen motor parameters
+const kCOUNTSPERDEGREE := 2097152/360;
+const kANCOUNTSPERDEGREE := 65536/360;
+const kCOUNTSPERVOLT := 204.8;
+const KMGNSERIALPORT% := 1;
+const kDEGPERSECRPM := 60.0/360.0;		' Deg/Sec * (60 sec/min / 360 deg/Rev)
+const kRPMDEGPERSEC := 360.0/60.0;   ' Rev/Min *  (360 deg/Rev  / 60 sec/Min)
+const SEQBITSPERVOLT:=6553.6;
+const DRMPMAX%:=31457280;
+const CHRPMAX%:=10485760;
+const ACKMODE%:=0;      'no error checking
+
+'Kollmorgen constants that might need to be changed
+const KMGNCHRVLIM:=30.0;		' Max speed allowed for chair (RPM) 180 deg/s max
+const KMGNDRMVLIM:=30.0;  		' Max speed allowed for drum (RPM)  180 deg/s max
+const KMGNCHRVSCALE:=25.0;  	' Scale allowed for chair --> affects max velocity tach can output
+const KMGNDRMVSCALE:=70.0;  	' Scale allowed for drum --> affects max velocity tach can output
+' VSCALE = motor velocity (RPM) per 10 V analog signal for ANIN and ANOUTs
+
+const CHRCHAN%:=1;
+const DRMCHAN%:=2;
+const HEYECHAN%:=3;
+const VEYECHAN%:=4;
+const HLZCHAN%:=9;
+const VLZCHAN%:=10;
+const UNITEVENTCHAN%:=5;
+const UNITCHAN%:=7;
+const REWCHAN%:=12;
+
+var MONKNAME$:="achilles";       'Monkey name for naming files
+
+var NUMMONITORS%:=2;

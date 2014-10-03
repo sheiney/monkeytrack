@@ -1,0 +1,2299 @@
+'Analysis environment for quickly displaying SMR files with minimal fuss
+'
+'			Written by Shane Heiney - Nov 29, 2002
+'
+'Also integrates export script for Chr,Drm,H/V eye,SS,CS
+'Export will soon do error checking to see if CS channel exists (ie chan 8)
+'Currently it just uses SS (chan 5) twice if separate CS channel doesn't exist
+'
+'Modified on Sept 22, 2003 to support exporting all channels to SMR file
+'
+'Massive modifications bringing it up to current state as of April 2010. Is now suitable for
+'displaying files containing trained animal data and for doing a variety of corrections to eye
+'and spike data.
+
+const UNITCHAN%:=7,UNITEVNTCHAN%:=5,CSCHAN%:=8;
+const CODECHAN%:=32;
+const ALLOWED%:=512+256+128+64+32+16+8+4+2+1;
+const VeyeChan%:= 4, HeyeChan%:=3;	' Channel numbers for vertical and horizontal eye position signal
+const VLzChan%:=10, HLzChan%:=9;    'laser channels
+const ChrChan%:=1, DrmChan%:=2;
+var Hbakchannum%:=23;
+var Vbakchannum%:=24;
+var HCTVirtualChan%:=0;
+var VCTVirtualChan%:=0;
+
+const NUMBUFFCHANS%:=26;		'Maximum number of buffer channels allowed
+
+var lh%;
+lh%:=LogHandle();
+var XYh%:=0;
+
+'var oldFnum$:="_cell";
+var oldFnum$:="_spursuit";
+
+var HEyeScale;
+var HEyeOffset;
+var VEyeScale;
+var VEyeOffset;
+var HLzScale;
+var VLzScale;
+var HCrossTalk,VCrossTalk;
+var HEyeTitle$;
+var HEyeUnits$;
+var HEyeComment$;
+var VEyeTitle$;
+var VEyeUnits$;
+var VEyeComment$;
+'!!!!!!!!!!Spike2 sucks at manipulating arrays!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+var defaultChans%[10];			'Array to hold default channel specifier
+var k%;
+var now,oldt;
+
+var ACCUMULATE%:=0;          'Flag to toggle on and off measurement accumulation
+var AccumArray[100];        'Array to accumulate measurements for computing statistics, used in Spike analysis menu
+var accumidx%:=0;            'Array index for current point
+
+ArrConst(defaultChans%[],1);		'Set all elements to 1
+
+'defaultChans%[0]:=(len(defaultChans%)-1);		'Make first element the number of channels
+
+'Now increment elements 1 through end-1 in steps of 1 to make 1,2,3,...,k
+for k%:=1 to len(defaultChans%[])-2 do			'minus 2 because we want to skip the last element
+	defaultChans%[k%]:=k%;
+next
+
+'defaultChans%[len(defaultChans%)-1]:=30;		'For text channel (30)
+'!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+var DataFH%;		'file handle for time view we are using
+var currentChan%:= 0;	' If channel is selected by user, process will be added to it
+var HSlopeId%,VSlopeId%;	'indexes for horiz and vert slope process for H and V chans
+var buffs%[NUMBUFFCHANS%];
+var buffCSChan%;			'Buffer holding CS channel when removing points
+var list$[NUMBUFFCHANS%];	'String for holding buff% numbers for DlgList()
+
+'Variables for making markers from chair movement
+var upcode$:="C";
+var dncode$:="c";
+var steptime:=.83;
+var lightchan%:=6;
+var bufftime:=0.2;
+
+var mkcodestr$:="P";    'Default marker code for cycle markers
+var MKSELECTED%:=0;      'Flag for whether user has changed automatically detected marker code (so we don't automatically overwrite their choice)
+
+MainToolbar%();
+
+var fDisk$,fPath$;
+
+func MainToolbar%();
+
+DataFH%:=FindOpenFile%();
+
+fDisk$:=FileName$(1);
+fPath$:=FileName$(2);
+fPath$:=fDisk$ + fPath$;
+if fPath$<>"" then
+	FilePathSet(fPath$);			' set default path to directory of current file
+endif
+
+ToolbarClear(); 'Clears old toolbar
+
+'ToolbarSet(0,"Idle",IdleProc%);
+ToolbarSet(1,"Quit",Quit%);  
+ToolbarSet(2,"Initialize",Init%);
+ToolbarSet(3,"Export Menu",ExportMenu%);
+ToolbarSet(4,"Mk Markers",MkMarkersToolbar%);
+
+ToolbarSet(5,"Label Cursors",LabelCursors%);
+
+'********If this part is causing the script to abort, it means you don't have a file open.********
+'********Open a data file and run the script again ***********************************************
+
+if DataFH% > 0 then		'If file is open, make these checks...
+    
+	if (view(DataFH%).ChanVisible(UNITCHAN%) > 0) then
+		ToolbarSet(6,"HideUnit", ChanHide%);
+    else 
+		ToolbarSet(6,"ShowUnit", ChanShow%);
+	endif
+	
+	if (view(DataFH%).ChanProcessInfo(VeyeChan%) > 0) then	'This assumes that veye and heye channels have same processes
+		ToolbarSet(7, "Show Pos",ShowPos%);							'and that the only process they have is 'slope'
+    else 																	'!!! Just a quick hack for now !!!
+		ToolbarSet(7, "Show Vel",ShowVel%);
+	endif;
+    
+else 
+    
+    '...otherwise just set sensible defaults
+	ToolbarSet(6,"HideUnit", ChanHide%);
+	ToolbarSet(7, "Show Vel",ShowVel%);
+endif
+
+ToolbarSet(11,"Scroll &F>>", ScrollForward%);	'linked to page down button
+ToolbarSet(12,"<< Scroll &B",ScrollBack%);		'linked to page up button
+
+ToolbarSet(14,"Eye Params",Params%);
+ToolbarSet(15,"Cal HEye",CalHEye%);
+ToolbarSet(16,"Cal VEye",CalVEye%);
+
+ToolbarSet(18,"Set Current",MakeCurrent%);
+ToolbarSet(20,"Show TextMarks",PrintTextMarks%);
+
+ToolbarSet(21,"Spike Tools",SpkToolbar%);
+ToolbarSet(22,"Eye Tools",EyeToolbar%);
+
+ToolbarSet(24,"Play Neuron",PlayUnitChan%);
+
+Toolbar("Choose an option",ALLOWED%);  ' until 'quit' button is pressed
+return 1
+end
+
+func EyeToolbar%()
+
+' Toolbar for analyzing/fixing eye data
+DataFH%:=FindOpenFile%();
+View(DataFH%);
+
+ToolBarClear();
+ToolBarSet(1,"Quit",Quit%);
+ToolBarSet(2,"Return",MainToolBar%);
+ToolBarSet(4,"Remove position gap",removeEyeGap%);
+ToolbarSet(5,"Remove crosstalk",CrosstalkToolbar%);
+
+Toolbar("Eye analysis tools",ALLOWED%);
+return 1;
+
+end
+
+func CrosstalkToolbar%()
+
+' Toolbar for analyzing/fixing eye data
+DataFH%:=FindOpenFile%();
+View(DataFH%);
+
+ToolBarClear();
+ToolBarSet(1,"Quit",Quit%);
+ToolBarSet(2,"Return",EyeToolbar%);
+ToolbarSet(4,"Make Adj chans",crosstalkMakeChans%);
+ToolBarSet(5,"Crosstalk params",crosstalkParams%);
+'ToolbarSet(6,"Adjust H",crosstalkAdjustH%);
+'ToolbarSet(7,"Adjust V",crosstalkAdjustV%);
+ToolbarSet(7,"Finalize",crosstalkFinalize%);
+
+Toolbar("Crosstalk compensation",ALLOWED%);
+return 1;
+
+end
+
+func crosstalkParams%()
+var ok%,hminus%,hplus%,vminus%,vplus%;
+var tmpHCT,tmpVCT;
+
+if HCTVirtualChan% = 0 then
+    Message("Please set up your Adjustment Channels before calling this function");
+    return 1;
+endif
+
+'Make XY view to show Vertical vs Horizontal eye data within Cursors 1 and 2   
+XYh% := MeasureToXY(14,HCTVirtualChan%,0.001);	
+view(XYh%).MeasureX(100,HCTVirtualChan%,"Cursor(0)");
+view(XYh%).MeasureY(100,VCTVirtualChan%,"Cursor(0)");
+view(XYh%).MeasureChan(1,"H vs V crosstalk");
+view(XYh%).Window(2,58,40,98);
+view(XYh%).WindowTitle$("Eye position crosstalk display");
+view(XYh%).WindowVisible(1);
+view(XYh%).XYJoin(1,0);	'Not joined
+view(XYh%).XYDrawMode(1,2,2);	'Set dot size to 2
+'view(XYh%).XAxisMode(1+2);
+'view(XYh%).YAxisMode(1+2);
+
+crosstalkUpdateXY%();  
+
+'Display dialog box for tweaking crosstalk
+DlgCreate("Crosstalk Parameters");  
+DlgReal(1,"Horizontal crosstalk (%V)",-1.0,1.0,26,1); 
+DlgCheck(2,"-",42,1);
+DlgCheck(3,"+",48,1);
+DlgReal(4,"Vertical crosstalk (%H)",-1.0,1.0,26,2);
+DlgCheck(5,"-",41,2);
+DlgCheck(6,"+",47,2);
+
+DlgAllow(ALLOWED%,0,crosstalkUpdateValues%);
+
+'Back-up original crosstalk values so we can restore if cancelled
+tmpHCT:=HCrossTalk;
+tmpVCT:=VCrossTalk;
+ok%:=DlgShow(HCrossTalk,hminus%,hplus%,VCrossTalk,vminus%,vplus%);
+
+'If user cancels, reset original values, otherwise leave them as newly set
+if ok%=0 then
+    HCrossTalk:=tmpHCT;
+    VCrossTalk:=tmpVCT;
+    view(DataFH%);
+    VirtualChan(HCTVirtualChan%,"Ch("+Str$(HeyeChan%)+")-"+Str$(HCrossTalk)+"*"+"Ch("+Str$(VeyeChan%)+")",HeyeChan%);
+    VirtualChan(VCTVirtualChan%,"Ch("+Str$(VeyeChan%)+")-"+Str$(VCrossTalk)+"*"+"Ch("+Str$(HeyeChan%)+")",VeyeChan%);  
+    crosstalkUpdateXY%();   
+endif
+
+return 1
+end
+
+func crosstalkUpdateValues%(item%)
+
+docase 
+case item%=1 then   'Changed H crosstalk value
+    HCrossTalk:=DlgValue(1);  
+case item%=2 then   'Checked 'minus' box, decrement H crosstalk value
+    HCrossTalk:=DlgValue(1);
+    HCrossTalk:=HCrossTalk-0.02;
+    DlgValue(1,HCrossTalk);
+    DlgValue(item%,0);  'Reset checkbox
+case item%=3 then   'Checked 'plus' box, increment H crosstalk value
+    HCrossTalk:=DlgValue(1);
+    HCrossTalk:=HCrossTalk+0.02;
+    DlgValue(1,HCrossTalk);
+    DlgValue(item%,0);  'Reset checkbox
+case item%=4 then   'Changed V crosstalk value
+    VCrossTalk:=DlgValue(4);
+case item%=5 then   'Checked 'minus' box, decrement V crosstalk value
+    VCrossTalk:=DlgValue(4);
+    VCrossTalk:=VCrossTalk-0.02;
+    DlgValue(4,VCrossTalk);
+    DlgValue(item%,0);  'Reset checkbox
+case item%=6 then   'Checked 'plus' box, decrement V crosstalk value
+    VCrossTalk:=DlgValue(4);
+    VCrossTalk:=VCrossTalk+0.02;
+    DlgValue(4,VCrossTalk);
+    DlgValue(item%,0);  'Reset checkbox
+else
+    return 1;
+endcase
+
+if HCTVirtualChan%>0 then
+    view(DataFH%);
+    VirtualChan(HCTVirtualChan%,"Ch("+Str$(HeyeChan%)+")-"+Str$(HCrossTalk)+"*"+"Ch("+Str$(VeyeChan%)+")",HeyeChan%);
+    VirtualChan(VCTVirtualChan%,"Ch("+Str$(VeyeChan%)+")-"+Str$(VCrossTalk)+"*"+"Ch("+Str$(HeyeChan%)+")",VeyeChan%);  
+    crosstalkUpdateXY%();   
+endif
+
+return 1;
+end
+
+func crosstalkUpdateXY%()
+'This function should mostly be called from within "change function" of dialog box and only if virtual channels already exist
+var t1,t2;
+var Hlow,Hhigh,Vlow,Vhigh;
+
+view(DataFH%);
+
+Hlow:=YLow(HCTVirtualChan%);
+Hhigh:=YHigh(HCTVirtualChan%);
+Vlow:=YLow(VCTVirtualChan%);
+Vhigh:=YHigh(VCTVirtualChan%);
+
+t1:=Cursor(1);
+t2:=Cursor(2);
+
+'Place cursors sensibly if they don't already exist
+if t1<0 then
+    t1:=Xlow()+0.4*(XHigh()-XLow());
+    Cursor(1,t1);
+endif
+
+if t2<0 then
+    t2:=Xlow()+0.6*(XHigh()-XLow());
+    Cursor(2,t2);
+endif
+
+view(XYh%).Process(t1,t2,1);
+view(XYh%).XRange(Hlow,Hhigh);
+view(XYh%).YRange(-1,Vlow,Vhigh);
+FrontView(XYh%);
+
+return 1;
+end
+
+func crosstalkMakeChans%()
+var tmp%,dummy%[100];
+var Hbakchannum%:=23;
+var Vbakchannum%:=24;
+
+view(DataFH%);
+
+'Backup channel info so it can be restored later
+HEyeTitle$:=ChanTitle$(HeyeChan%);
+HEyeUnits$:=ChanUnits$(HeyeChan%);
+HEyeComment$:=ChanComment$(HeyeChan%);
+VEyeTitle$:=ChanTitle$(VeyeChan%);
+VEyeUnits$:=ChanUnits$(VeyeChan%);
+VEyeComment$:=ChanComment$(VeyeChan%);
+
+'Back up channels
+tmp%:=ChanList(dummy%[],Print$("%d",Hbakchannum%));  'Test if channel BACKUP channel already exists and if so prompt for new one
+if dummy%[0] > 0 then
+    Hbakchannum%:=Input(Print$("Channel %d already exists. Enter a new channel number for BACKUP or zero to not back up.",Hbakchannum%),23,0,32);
+    tmp%:=ChanList(dummy%[],Print$("%d",Hbakchannum%));
+    if dummy%[0] > 0 and Hbakchannum% <> 0 then
+        Message("No Changes made. Please try again with valid backup channel number.");
+        return 1;
+    endif
+endif
+
+tmp%:=ChanList(dummy%[],Print$("%d",Vbakchannum%));  'Test if channel BACKUP channel already exists and if so prompt for new one
+if dummy%[0] > 0 then
+    Vbakchannum%:=Input(Print$("Channel %d already exists. Enter a new channel number for BACKUP or zero to not back up.",Vbakchannum%),24,0,32);
+    tmp%:=ChanList(dummy%[],Print$("%d",Vbakchannum%));
+    if dummy%[0] > 0 and Vbakchannum% <> 0 then
+        Message("No Changes made. Please try again with valid backup channel number.");
+        return 1;
+    endif
+endif
+
+if Hbakchannum% <> 0 then
+    ChanSave(HeyeChan%,Hbakchannum%); 'Backup the channel before making changes
+endif
+if Vbakchannum% <> 0 then
+    ChanSave(VeyeChan%,Vbakchannum%); 'Backup the channel before making changes
+endif
+
+'Copy channel to array
+ChanScale(HeyeChan%,1.0);    'Set units to volts
+ChanOffset(HeyeChan%,0.0);
+ChanScale(VeyeChan%,1.0);    'Set units to volts
+ChanOffset(VeyeChan%,0.0);
+
+if HCTVirtualChan% = 0 then 'Make new channels
+    HCTVirtualChan%:=VirtualChan(0,"Ch("+Str$(HeyeChan%)+")-"+Str$(HCrossTalk)+"*"+"Ch("+Str$(VeyeChan%)+")",HeyeChan%);
+    VCTVirtualChan%:=VirtualChan(0,"Ch("+Str$(VeyeChan%)+")-"+Str$(VCrossTalk)+"*"+"Ch("+Str$(HeyeChan%)+")",VeyeChan%);
+else 'Modify existing channels
+    VirtualChan(HCTVirtualChan%,"Ch("+Str$(HeyeChan%)+")-"+Str$(HCrossTalk)+"*"+"Ch("+Str$(VeyeChan%)+")",HeyeChan%);
+    VirtualChan(VCTVirtualChan%,"Ch("+Str$(VeyeChan%)+")-"+Str$(VCrossTalk)+"*"+"Ch("+Str$(HeyeChan%)+")",VeyeChan%);    
+endif
+
+ChanShow(HCTVirtualChan%);
+Optimise(HCTVirtualChan%);
+ChanShow(VCTVirtualChan%);
+Optimise(VCTVirtualChan%);
+
+return 1;
+end
+
+func crosstalkFinalize%()
+var HmemChan%,VmemChan%;
+var nH%,nV%;
+
+view(DataFH%);
+
+'Copy settings from existing H and V eye channels
+HmemChan%:=MemChan(0,HeyeChan%);
+VmemChan%:=MemChan(0,VeyeChan%);
+
+'Copy virtual channels into memory channels
+if HmemChan% > 0 then
+    nH%:=MemImport(HmemChan%,HCTVirtualChan%,0,MaxTime());
+endif
+
+if VmemChan% > 0 then
+    nV%:=MemImport(VmemChan%,VCTVirtualChan%,0,MaxTime());
+endif
+
+'Save memory channels back to original eye channels
+if nH% > 0 then
+    nH%:=MemSave(HmemChan%,HeyeChan%,0,0);
+    ChanComment$(HeyeChan%,HEyeComment$+Print$(", corrected for %2.1f %% crosstalk from VEye",HCrossTalk*100));
+    ChanTitle$(HeyeChan%,HEyeTitle$);
+    ChanUnits$(HeyeChan%,HEyeUnits$);
+    ChanColour(HeyeChan%,1,16);
+    ChanDelete(HmemChan%);
+    ChanDelete(HCTVirtualChan%);
+    HmemChan%:=0;
+    HCTVirtualChan%:=0;
+    ChanShow(HeyeChan%);
+    Optimise(HeyeChan%);
+endif
+
+if nV% > 0 then
+    nV%:=MemSave(VmemChan%,VeyeChan%,0,0);
+    ChanComment$(VeyeChan%,VEyeComment$+Print$(", corrected for %2.1f %% crosstalk from HEye",VCrossTalk*100));
+    ChanTitle$(VeyeChan%,VEyeTitle$);
+    ChanUnits$(VeyeChan%,VEyeUnits$);
+    ChanColour(VeyeChan%,1,16);
+    ChanDelete(VmemChan%);
+    ChanDelete(VCTVirtualChan%);
+    VmemChan%:=0;
+    VCTVirtualChan%:=0;
+    ChanShow(VeyeChan%);
+    Optimise(VeyeChan%);
+endif
+
+return 1;
+end
+
+func PlayUnitChan%()
+var st,ed,ok%;
+
+DataFH%:=FindOpenFile%();
+View(DataFH%);
+
+st:=Cursor(1);
+ed:=Cursor(2);
+
+if st < 0 then
+    st:=NextTime(UNITCHAN%,0);
+    if st < 0 then
+        Message("No data to play on unit channel.");
+        return 1;
+    endif
+endif
+ 
+if ed < 0 then
+    ed:=MaxTime(UNITCHAN%);
+    if ed < 0 then
+        Message("No data to play on unit channel.");
+        return 1;
+    endif
+endif
+
+ok%:=PlayOffline(UNITCHAN%,-1,st,ed,1,1,1);
+
+ToolbarSet(24,"STOP play",StopPlayUnitChan%);
+ToolbarSet(0,"",CheckPlayUnitChan%);
+
+return 1;
+end
+
+func StopPlayUnitChan%()
+var ok%;
+
+ok%:=PlayOffline(-1);
+ToolbarSet(24,"Play Neuron",PlayUnitChan%);
+ToolbarSet(0,"");
+
+return 1;
+end
+
+func CheckPlayUnitChan%()
+var playing%;
+
+playing%:=PlayOffline(0);
+if playing% < 0 then
+    ToolbarSet(24,"Play Neuron",PlayUnitChan%);
+    ToolbarSet(0,"");
+endif
+
+return 1;
+end
+
+func removeEyeGap%()
+'Find gaps in eye positon data and correct them. 
+'This is designed for fixing data from Primelec system in which eye data contains gap at +/- 0.02 volts.
+const MAXCHANSIZE%:=10000000;   'Maximum size of arrays: 10,000,000 corresponds to 5.5 hours of data at 500 Hz sampling rate (80 MBytes of memory)
+
+var ndata%; 'length of data (number of points on channel
+var junkdata[MAXCHANSIZE%];     'Only used for determining correct size of dynamically allocated data arrays
+'var oldEyeData[MAXCHANSIZE%];
+'var newEyeData[MAXCHANSIZE%];
+var channum%:=3;   'Channel number of data to be corrected (probably 3, corresponding to H eye chan)
+var bakchannum%;    'Channel number for backup of data
+var lthresh:=-0.02,uthresh:=0.02;
+var ok%:=0;
+var dummy%[2];
+var tmp%;
+var sT; 'Start time of data channel--to be used when rewriting data after correction
+var i%; 'For iteration in FOR loop
+var gapstart:=0;
+var matresponse$;
+
+HCursorRenumber();
+
+if HCursorChan(1)=channum% then
+    lthresh:=Hcursor(1);
+endif
+if HCursorChan(2)=channum% then
+    uthresh:=Hcursor(2);
+endif
+
+DlgCreate("Parameters for eye position gap removal");
+DlgInteger(1,"Eye channel to use",1,850,0,0,"3|4");
+DlgReal(2,"Upper threshold of gap (volts)",-5.0,5.0);
+DlgReal(3,"Lower threshold of gap (volts)",-5.0,5.0);
+DlgAllow(ALLOWED%);
+ok%:=DlgShow(channum%,uthresh,lthresh);
+
+if not ok% then
+    Message("No changes made");
+    return 1;
+endif
+
+'Back up channel
+bakchannum%:=20+channum%;
+if bakchannum% > 30 then
+    bakchannum%:=Input("Channel number for BACKUP",23,1,100);
+endif
+
+
+
+tmp%:=ChanList(dummy%[],Print$("%d",bakchannum%));  'Test if channel BACKUP channel already exists and if so prompt for new one
+if dummy%[0] > 0 then
+    bakchannum%:=Input(Print$("Channel %d already exists. Enter a new channel number for BACKUP or zero to not back up.",bakchannum%),23,0,32);
+    tmp%:=ChanList(dummy%[],Print$("%d",bakchannum%));
+    if dummy%[0] > 0 and bakchannum% <> 0 then
+        Message("No Changes made. Please try again with valid backup channel number.");
+        return 1;
+    endif
+endif
+
+ChanSave(channum%,bakchannum%); 'Backup the channel before making changes
+
+'Copy channel to array
+ChanScale(channum%,1.0);    'Set units to volts
+ChanOffset(channum%,0.0);
+
+'Open Matlab instance
+ok%:=MatLabOpen(1);
+if ok% < 0 then
+    Message("Matlab couldn't be opened. No changes made.");
+    return 1;
+endif
+'MatLabShow(1);
+
+while gapstart >= 0 do
+    'First figure out how much data exists on channel, so I can dynamically allocate the data arrays
+    ndata%:=ChanData(channum%,junkdata[],gapstart,MaxTime(channum%),sT); 'Fill array with channel data [gap in data terminates read]
+    'Now make actual arrays to be used
+    var oldEyeData[ndata%];
+    ndata%:=ChanData(channum%,oldEyeData[],gapstart,MaxTime(channum%),sT); 'Fill array with channel data [gap in data terminates read]
+    'Use ndata returned in last call in case it's different than first call for some reason
+    var newEyeData[ndata%];
+    
+    'Calculate amount to shift data
+    
+    'Make correction
+'    for i%:=0 to ndata%-1 do
+'        if oldEyeData[i%] < uthresh and oldEyeData[i%] > lthresh then
+'            oldEyeData[i%]:=uthresh;    'Set values within gap to upper threshold value
+'        endif
+'        
+'        if oldEyeData[i%] >= uthresh then
+'            newEyeData[i%]:=oldEyeData[i%];
+'        else
+'            newEyeData[i%]:=oldEyeData[i%]+(uthresh-lthresh);
+'        endif
+    '    next
+    
+    'Call Matlab to make correction
+    ok%:=MatLabPut("position",oldEyeData[],4);      'Use single precision floating point for real data
+    if ok% < 0 then
+        Message("Matlab wouldn't accept variables. Stopped execution.");
+        return 1;
+    endif
+    ok%:=MatLabPut("uthreshold",uthresh);
+    if ok% < 0 then
+        Message("Matlab wouldn't accept variables. Stopped execution.");
+        return 1;
+    endif
+    ok%:=MatLabPut("lthreshold",lthresh);
+    if ok% < 0 then
+        Message("Matlab wouldn't accept variables. Stopped execution.");
+        return 1;
+    endif
+    ok%:=MatLabPut("READY",0);       ' Reset status of Matlab execution so we can check when it's done
+    if ok% < 0 then
+        Message("Matlab wouldn't accept variables. Stopped execution.");
+        return 1;
+    endif
+    
+    ok%:=MatLabEval("fixeyegapS2",matresponse$);
+    if ok% < 0 then
+        Message("Matlab encountered problem while executing script. Stopped execution.");
+        return 1;
+    endif
+    PrintLog(matresponse$);
+    
+    ok%:=MatLabGet("position",newEyeData[]);
+    if ok% < 0 then
+        Message("Matlab wouldn't send corrected data. Stopped execution.");
+        return 1;
+    endif
+    
+    'Write corrected array back to channel
+    tmp%:=ChanWriteWave(channum%,newEyeData[],sT);    'Write data back to channel, overwriting existing data
+    
+    var tmpMemChan%;
+    
+    tmpMemChan%:=MemChan(1,0,BinSize(channum%));
+    MemSetItem(tmpMemChan%,0,sT,newEyeData[]);
+    ChanShow(tmpMemChan%);
+    
+    gapstart:=NextTime(channum%,sT+ndata%*BinSize(channum%)+BinSize(channum%));
+    
+wend
+
+MatLabClose();
+
+ChanComment$(HeyeChan%,ChanComment$(HeyeChan%)+", gap removed");
+ChanDelete(tmpMemChan%);
+
+return 1;
+end
+
+func Quit%();           'Disabling the toolbar seems to abort the script; nice side effect for quitting :)
+ToolbarEnable(-1,0);	 'This is used to quit because negating button number as escape is fucked up as of version 4.12
+return 0;  'toolbar not active
+end	
+
+'IdleProc% not used because buggy and unnecessary
+'func IdleProc%()		'function is run when script isn't doing anything else
+'	var vh%;
+'	vh%:=FindOpenFile%();
+'	if vh% <> DataFH% then 
+'		DataFH%:=vh%;
+'		if DataFH%=0 then return 1; endif
+'		MainToolbar%();
+'	endif;
+'	'yield(0.05,ALLOWED%);		'yield for 50 msec to make program more responsive
+'	return 1;
+'end
+
+func PrintTextMarks%()
+var TextTimes[100]; 'Array to hold marker times
+var nummarks%;      'Number of textmarks
+var TextComment$;   'String to hold textmark
+var i%,code%[4];
+
+MakeCurrent%();
+View(DataFH%);
+
+ClearLog%();
+
+nummarks%:=ChanData(30,TextTimes[],0,MaxTime());
+
+for i%:=0 to nummarks%-1 do
+    NextTime(30,TextTimes[i%]-0.001,code%[],TextComment$);
+    PrintLog("%.1f --> %s\n",TextTimes[i%],TextComment$);
+next;
+
+FrontView(LogHandle());
+View(DataFH%);
+
+return 1;
+end
+
+func LabelCursors%()
+MakeCurrent%();
+View(DataFH%);
+CursorLabel(2);		'label V cursor with number
+HCursorLabel(1);		'label H cursor with position
+return 1;  'toolbar remains active
+end
+
+func ChanHide%() 'toggle raw unit channel
+MakeCurrent%();
+View(DataFH%).ChanHide(UNITCHAN%); 
+ToolbarSet(6,"ShowUnit", ChanShow%);  'change button to show raw unit
+return 1 'Toolbar remains active
+end
+
+func ChanShow%();       'toggle raw unit channel 
+MakeCurrent%();
+View(DataFH%).ChanShow(UNITCHAN%); 
+ToolbarSet(6,"HideUnit", ChanHide%); 'change button to hide raw unit
+return 1 'toolbar remains active
+end
+
+func ShowVel%()
+MakeCurrent%();
+view(DataFH%);
+HSlopeId%:= ChanProcessAdd(HEyeChan%,3,0.03);	'Add slope process to H eye chan
+VSlopeId%:= ChanProcessAdd(VEyeChan%,3,0.03);	'Same for V eye chan--> last arg is delta_t/2
+
+ToolbarSet(7, "Show Pos", ShowPos%);
+return 1
+end
+
+func ShowPos%()
+MakeCurrent%();
+view(DataFH%);
+ChanProcessClear(HEyeChan%,HSlopeId%);	'Remove slope process from H eye chan
+ChanProcessClear(VEyeChan%,VSlopeId%);	'Same for V eye chan
+
+ToolbarSet(7, "Show Vel", ShowVel%);
+return 1
+end
+
+func MakeCurrent%()
+
+DataFH%:=FindOpenFile%();
+View(DataFH%);
+Window(0,0,100,100);		'fit window to entire screen
+
+return 1;
+end
+
+func ClearLog%()
+view(lh%).EditSelectAll();
+view(lh%).EditClear();
+return 1;
+end
+
+func Init%()					'Initializes time view to sensible config
+DataFH%:=FindOpenFile%();
+View(DataFH%);
+var filemode%;  '0 if untrained animal, 1 if trained (this specifically determines y-range to use for channels and other things unique to trained animal files)
+var tst;    'Time of first data point in file for setting yrange
+
+'filemode%:=Query("File mode Query|Which kind of file is this?","Trained animal","Untrained animal");
+
+HEyeScale:=ChanScale(HeyeChan%);
+HEyeOffset:=ChanOffset(HeyeChan%);
+VEyeScale:=ChanScale(VeyeChan%);
+VEyeOffset:=ChanOffset(VeyeChan%);
+HLzScale:=ChanScale(HLzChan%);
+VLzScale:=ChanScale(VLzChan%);
+
+ChanShow(-1);   'Show all channels
+Grid(1);
+ChanHide%();				'Hide raw unit channel so view draws faster
+ChanProcessClear(-1);	'Clear all channel processes
+'YRange(-2);					'Show all for visible channels
+DrawMode(UNITEVNTCHAN%,7,2);	'draw unit event as instantaneous freq, with large dots
+YRange(UNITEVNTCHAN%,0,300);	'Set default y max of 300 spk/s for unit chan
+DrawMode(30,14);                'Draw textmark channel as text
+tst:=NextTime(HeyeChan%,0);
+XRange(tst,MaxTime()); 	'Show all in time axis
+
+YRange(HeyeChan%,-20,20);
+YRange(VeyeChan%,-20,20);
+YRange(ChrChan%,-20,20);
+YRange(DrmChan%,-20,20);
+YRange(HLzChan%,-20,20);
+YRange(VLzChan%,-20,20);
+
+'if filemode% = 1 then
+'    YRange(HeyeChan%,-20,20);
+'    YRange(VeyeChan%,-20,20);
+'    YRange(ChrChan%,-20,20);
+'    YRange(DrmChan%,-20,20);
+'    YRange(HLzChan%,-20,20);
+'    YRange(VLzChan%,-20,20);
+'else
+'    Optimise(HeyeChan%);
+'    Optimise(VeyeChan%);
+'    YRange(ChrChan%);
+'    YRange(DrmChan%);
+'endif
+
+ChanColour(HeyeChan%,1,16);
+ChanColour(VeyeChan%,1,16);
+XAxisStyle(1);				'Use HH:MM:SS mode
+Window(0,0,100,100);		'fit window to entire screen
+return 1;
+end
+
+func ScrollForward%()
+var tStart,tEnd,tRange;
+view(DataFH%);
+tStart:=XLow();tEnd:=XHigh();
+tRange:=tEnd-tStart;
+tStart:=tEnd;tEnd:=tStart+tRange;
+XRange(tStart,tEnd);
+return 1;
+end
+
+func ScrollBack%()
+var tStart,tEnd,tRange;
+view(DataFH%);
+tStart:=XLow();tEnd:=XHigh();
+tRange:=tEnd-tStart;
+tEnd:=tStart;tStart:=tEnd-tRange;
+XRange(tStart,tEnd);
+return 1;
+end
+
+' This returns the handle of a file, or 0 if none selected or opened.
+func FindOpenFile%()					'If one file, return handle. If more than one, prompt
+var nFiles%,hdls%[10],i%,prompt$,vh%;
+
+vh%:=FrontView();
+
+if ViewKind(vh%)=0 then 'Time view
+    return vh%;
+else return -1;
+endif
+
+
+nFiles% := ViewList(hdls%[],1+32768+65536); ' get number of time views, no duplicates or hidden views
+
+if nFiles%=0 then return 0 endif;       ' prompt open new file box
+if nFiles%=1 then return hdls%[1] endif;				' if 1, return it
+
+'More than one file, so let user choose which to open
+for i% := 1 to hdls%[0] do
+    if i%>1 then prompt$ := prompt$+"|" endif; ' add separator
+	prompt$ := prompt$+View(hdls%[i%]).FileName$(3)+View(hdls%[i%]).FileName$(4);
+next;
+
+DlgCreate("Which time view shall we use?");
+DlgList(1,"Select file to view",prompt$); 'Prompt user to select file 
+if DlgShow(i%) then return hdls%[i%+1] else return 0; 
+endif;
+end
+
+func SpkToolbar%()
+
+DataFH%:=FindOpenFile%();
+
+ToolbarClear();
+
+ToolbarSet(1,"Quit",Quit%);
+ToolbarSet(2,"Return",MainToolbar%);
+
+ToolbarSet(4,"Make Spk Buffer",MakeSpkBuff%);		'Extract spikes to memory buffer
+ToolbarSet(5,"Swap Buffers",SwapBuffs%);		'Rearrange buffers before writing to channel
+ToolbarSet(6,"Write Spk Chan",WriteSpkChan%);	'Must make Spk chan in memory buffer before it can be written
+ToolbarSet(7,"Delete Buffers",DelMemBuffs%);	'Remove all memory buffers from file
+ToolbarSet(8,"Add/Remove Points",RemPointsToolbar%);
+ToolbarSet(9,"Spike Analysis",SpkAnalysisToolbar%);
+ToolbarSet(10,"Process MUA",MUAprocess%);
+
+ToolbarSet(12,"Scroll >>|0x22", ScrollForward%);	'linked to page down button
+ToolbarSet(13,"<< Scroll|0x21",ScrollBack%);		'linked to page up button
+
+Toolbar("Spike Editing Tools",ALLOWED%);
+return 1;
+end
+
+func SpkAnalysisToolbar%()
+
+DataFH%:=FindOpenFile%();
+
+ACCUMULATE%:=0;
+ArrConst(AccumArray[],0);
+accumidx%:=-1;
+
+ToolbarClear();
+ClearLog%();
+
+ToolbarSet(1,"Quit",Quit%);
+ToolbarSet(2,"Return",SpkToolbar%);
+
+ToolbarSet(4,"CV2",CalcCV2%);
+ToolbarSet(5,"Time Constant",CalcTimeConstant%);
+ToolbarSet(7,"accumulate",ToggleAccum%);
+ToolbarSet(8,"Dump stack",RemFromStack%);
+ToolbarSet(10,"Mean",AccumMean%);
+ToolbarSet(11,"Median",AccumMedian%);
+
+ToolbarSet(13,"Set Current",NewAnalysisFile%);
+
+ToolbarEnable(10,0);
+ToolbarEnable(11,0);
+
+Toolbar("Spike Analysis Tools",ALLOWED%);
+return 1;
+end
+
+func NewAnalysisFile%()
+MakeCurrent%();
+SpkAnalysisToolbar%();
+
+return 1;
+end
+
+func AccumMean%()
+var meanval,stdval,numpts%;
+
+numpts%:=accumidx%+1; 
+
+ArrSum(AccumArray[0:numpts%],meanval,stdval);
+PrintLog("Mean of accumulated values is %4.3f +/- %4.3f, n=%d\n",meanval,stdval,numpts%);
+FrontView(lh%);
+
+return 1;
+end
+
+func AccumMedian%()
+var medianval;
+var numpts%;
+
+numpts%:=accumidx%+1; 
+
+var SortedArray[numpts%];
+
+ArrConst(SortedArray[],AccumArray[0:numpts%]);
+ArrSort(SortedArray[]);
+
+if iseven%(numpts%) then
+    medianval:=(SortedArray[numpts%/2-1]+SortedArray[numpts%/2])/2;
+else
+    medianval:=SortedArray[floor(numpts%/2.0)];
+endif
+
+PrintLog("Median of accumulated values is %4.3f, n=%d\n",medianval,accumidx%);
+FrontView(lh%);
+
+return 1;
+end
+
+
+func ToggleAccum%()
+
+if ACCUMULATE% then
+    ToolbarSet(7,"accumulate",ToggleAccum%);
+    ACCUMULATE%:=0;
+    ToolbarEnable(10,0);
+    ToolbarEnable(11,0);
+else
+    ToolbarSet(7,"ACCUMULATING",ToggleAccum%);
+    ACCUMULATE%:=1;
+    ArrConst(AccumArray[],0);   'Reset array
+    accumidx%:=-1;    'Reset array index for accumulation
+    ToolbarEnable(10,1);
+    ToolbarEnable(11,1);
+endif
+
+return 1;
+end
+
+func RemFromStack%()
+
+if accumidx% < 0 then    'If already at beginning of array, do nothing
+    return 1;
+endif
+
+AccumArray[accumidx%]:=0;
+accumidx%-=1;
+
+PrintLog("Value %d dropped from accumulation stack\n", accumidx%+1);
+FrontView(lh%);
+
+return 1;
+end
+
+func CalcTimeConstant%()
+var HC1Chan%, HC2Chan%; 'Channel containing H cursors
+var tst,tend,vst,vend;    'Start and end times and values (determined by cursors 1 and 2 and H cursors 1 and 2)
+var deltafr, tau;       'Calculated change in firing rate based on cursor levels and corresponding time constant.
+var C0returnVal;
+
+view(DataFH%);
+
+'This function requires the user to place 2 vertical and 2 horizontal cursors on the spike channel to demarcate 
+'the beginning and end of the measurement region and the minimum and maximum firing rate values. The algorithm then
+'finds the time at 63% of the maximum change in firing rate by interpolation. 
+
+'HC1Chan%:=HCursorChan(1);
+'HC2Chan%:=HCursorChan(2);
+'
+'if HC1Chan% <> UNITEVNTCHAN% or HC2Chan% <> UNITEVNTCHAN% then
+'    Message("Please place H cursors 1 and 2 on Spike Channel and try again");
+'    return 1;
+'endif
+
+if not CursorExists(1) or not CursorExists(2) then
+    Message("Please place cursors 1 and 2 at start and end of measurement region and try again");
+    return 1;
+endif
+
+if not CursorExists(3) then
+    CursorNew(Cursor(1),3);
+endif
+
+tst:=Cursor(1);
+tend:=Cursor(2);
+'vst:=HCursor(1);
+'vend:=HCursor(2);
+
+if tst >= tend then
+    Message("Please rearrange vertical cursors 1 and 2 and try again.");
+    return 1;
+endif
+
+deltafr:=vend-vst;
+
+CursorActive(0,16,UNITEVNTCHAN%,"Cursor(1)");
+CursorActive(3,15,UNITEVNTCHAN%,"Cursor(0)","Cursor(2)","Cursor(2)",0,63.2,tend-tst,"Cursor(2)");
+C0returnVal:=CursorSearch(0,4);
+
+if CursorValid(3) and (Cursor(3) <> Cursor(2)) then
+    accumidx%+=1;   'Increment index before assigning value
+    tau:=Cursor(3)-tst;
+    PrintLog("Time Constant: %4.3f\n", tau);
+    FrontView(lh%);
+    AccumArray[accumidx%]:=tau;
+else
+    PrintLog("Couldn't find valid time: Cursor 0 returning %4.3f\n",C0returnVal);
+    FrontView(lh%);
+endif 
+
+
+return 1;
+end
+
+func CalcCV2%()
+
+var tst,tend,maxpts%;
+var numEvnts%,numISIs%,numCV2s%;
+var medcv2,meancv2;
+var i%;
+
+view(DataFH%);
+
+tst:=Cursor(1);
+tend:=Cursor(2);
+
+if tst < 0 or tend < 0 then
+    Message("Please place Cursors 1 and 2 to indicate time range to process and try again");
+    return 1;
+endif
+
+'Declare array sizes here so we can make a sensible guess at appropriate size based on length of time
+maxpts%:=floor((tend-tst)*250);     'Assume mean firing rate will never be above 250 over the course of several seconds
+var times[maxpts%],isis[maxpts%],cv2s[maxpts%];
+
+numEvnts%:=ChanData(UNITEVNTCHAN%,times[],tst,tend);
+numISIs%:=numEvnts%-1;
+numCV2s%:=numISIs%-1;
+
+ArrConst(isis[],times[]);
+ArrDiff(isis[]);    'Calculate ISIs (first element in array isn't changed--it's start time)
+
+for i%:=1 to numISIs%-1 do
+    cv2s[i%-1]:=2*abs(isis[i%+1]-isis[i%])/(isis[i%+1]+isis[i%]);
+next;
+
+ArrSum(cv2s[0:numCV2s%],meancv2);
+
+var SortedArray[numCV2s%];
+
+ArrConst(SortedArray[],cv2s[0:numCV2s%]);
+ArrSort(SortedArray[]);
+
+if iseven%(numCV2s%) then
+    medcv2:=(SortedArray[numCV2s%/2-1]+SortedArray[numCV2s%/2])/2;
+else
+    medcv2:=SortedArray[floor(numCV2s%/2.0)];
+endif
+
+PrintLog("Mean CV2: %3.2f\nMedian CV2: %3.2f\n",meancv2,medcv2);
+FrontView(lh%);
+
+return 1;
+end
+
+func MUAprocess%()
+'Rectify and smooth unit channel to get MUA envelope
+'10 ms smoothing window
+var virtchannum%,memchannum%,diskchannum%:=8;
+var smoothtime:=0.010; '10 ms
+var ok%;
+
+MakeCurrent%();
+
+virtchannum%:=VirtualChan(0,"abs(ch("+str$(UNITCHAN%)+"))",UNITCHAN%);
+if virtchannum% < 0 then
+    Message("Couldn't create virtual channel to hold waveform.");
+    return 1;
+endif
+
+ChanProcessAdd(virtchannum%,1,smoothtime);
+
+memchannum%:=MemChan(0,UNITCHAN%);
+if memchannum% <= 0 then   
+    Message("Couldn't create memory channel to hold transformed waveform.");
+    return 1;
+endif
+
+ok%:=MemImport(memchannum%,virtchannum%,0,MaxTime());
+if ok% < 0 then
+    Message("Nothing imported to memory channel.");
+    return 1;
+endif
+
+ok%:=ChanKind(diskchannum%);
+if ok% > 0 then 'Channel already exists; ask user to overwrite
+    ChanShow(diskchannum%);
+    ok%:=Query("Channel "+Str$(diskchannum%)+" already exists. Overwrite it? Saying no will create new channel.","Overwrite","New chan");
+    if ok% then
+        ChanDelete(diskchannum%);
+    else
+        diskchannum%:=0; 'Use lowest number
+    endif   
+endif
+
+diskchannum%:=ChanSave(memchannum%,diskchannum%);
+if diskchannum% > 0 then
+    ChanTitle$(diskchannum%,"MUA");
+    ChanComment$(diskchannum%,"Envelope of rectified raw unit, smoothed with "+Str$(smoothtime,4,3)+" s window");
+    Optimise(diskchannum%);
+    ChanDelete(memchannum%);
+    ChanDelete(virtchannum%);
+    ChanShow(diskchannum%);
+endif
+
+return 1;
+end
+
+func BuffChans%(buffs%[])		'Check number of memory buffers
+' If no buffers exist, returns 0 and leaves buffs%[] unchanged
+' If buffers exist returns number of buffers and stores the channel numbers in buffs%[]
+' Element zero in buffs%[] is number of channels, following ChanList% syntax
+view(DataFH%);	
+
+var numBuffs%,dummy%;
+const TYPES%:=2+4096+16384;	'Mask event chans only, exclude disk chans and duplicates (see DlgChan())
+
+dummy%:=ChanList(buffs%[],TYPES%);
+numBuffs%:=buffs%[0];
+
+return numBuffs%;			
+
+end
+
+func MaskS%()
+view(DataFH%);
+MarkMask(32,0,0,-1);
+MarkMask(32,0,1,"S");
+return 1
+end
+
+func MaskD%()
+view(DataFH%);
+MarkMask(32,0,0,-1);
+MarkMask(32,0,1,"D");
+return 1
+end
+
+func Maskb%()
+view(DataFH%);
+MarkMask(32,0,0,-1);
+MarkMask(32,0,1,"b");
+return 1
+end
+
+'""""" Need to finish this function -- not operational right now
+func RemPointsToolbar%()		'Remove items between cursor 1 and cursor 2 from CS channel
+var numBuffs%;		'Channel number of buffer just created by MemChan(); will be zero or negative if error encountered
+var buffIndex%:=0;
+var ok%;
+
+view(DataFH%);	'Make time view current
+
+'Message("This function not implemented yet");
+'return 1;
+
+numBuffs%:=BuffChans%(buffs%[]);
+
+'CursorDelete(-1);			'Remove all cursors from time view
+'
+''Now add cursors 1 and 2
+'CursorNew(1);
+'GetCursor1%();
+'CursorNew(2);
+'GetCursor2%();  
+
+docase
+    
+case numBuffs% = 0 then
+    buffCSChan%:=MemChan(2);		'Make Event- channel
+    MemImport(buffCSChan%,CSCHAN%,0,MaxTime(CSCHAN%));		'Import all of CS channel
+    
+case numBuffs% = 1 then
+    buffCSChan%:=buffs%[1];
+    
+case numBuffs% > 1 then
+    StringList%(buffs%[]);
+    DlgCreate("Select a Memory Channel to remove points from");
+    DlgList(1,"CS memory channel",list$[],buffs%[0]);
+    ok%:=DlgShow(buffIndex%);
+    
+    if ok% then
+        buffCSChan%:=buffs%[buffIndex%+1];		'Add one because first element in buffs%[] is number of buffers
+    else return 1;
+    endif
+    
+else
+    Message("Error finding memory channel");
+endcase
+
+ToolbarClear();
+
+ToolbarSet(1,"Quit",Quit%);
+ToolbarSet(2,"Return",SpkToolbar%);
+
+ToolbarSet(4,"Get Cur&sor 1",GetCursor1%);
+ToolbarSet(5,"&Get Cursor 2",GetCursor2%);
+ToolbarSet(6,"&Change Active Buffer",ChangeBuff%);
+ToolbarSet(7,"&Remove Point",RemPoint%);
+ToolbarSet(8,"Remo&ve Points",RemPoints%);
+ToolbarSet(9,"A&dd Points",AddPoints%);
+ToolbarSet(10,"&Add Point",AddPoint%);
+ToolbarSet(11,"Remove Pts Above",RemAbove%);
+
+ToolbarSet(13,"Scroll &F>>", ScrollForward%);	'linked to page down button
+ToolbarSet(14,"<<&B Scroll",ScrollBack%);		'linked to page up button
+
+Toolbar("Spike Removal Menu",ALLOWED%);
+end
+
+func GetCursor1%()
+var position1;
+
+view(DataFH%);	'Make time view current
+
+position1:=(xLow() + xHigh())/2 - (xHigh()-xLow())/4;
+Cursor(1,position1);
+return 1;
+end
+
+func GetCursor2%()
+var position2;
+
+view(DataFH%);	'Make time view current
+
+position2:=(xLow() + xHigh())/2 + (xHigh()-xLow())/4;
+Cursor(2,position2);
+return 1;
+end
+
+func RemAbove%()
+var sTime,eTime,thresh;
+var pt%,tm;
+
+view(DataFH%);	'Make time view current
+
+CursorRenumber();
+sTime:=Cursor(1);
+eTime:=Cursor(2);
+thresh:=HCursor(1);
+
+Interact("Please position Horizontal cursor 1 at upper threshold",1+2+4+8+16+32+64+128+256+512);
+
+Cursor(0,sTime);
+CursorActive(0,19,buffCSChan%,0.00005,"","",thresh,0,0,"",0.0);
+
+tm:=CursorSearch(0);
+
+repeat
+    MemDeleteTime(buffCSChan%,0,tm,0.0002);
+    tm:=CursorSearch(0);
+until (tm > eTime) or (tm=-1);
+
+
+return 1;
+end
+
+func RemPoints%()
+var sTime,eTime;
+var dummy[10000],numItems%,ok%;
+    
+	view(DataFH%);	'Make time view current
+    
+	sTime:=Cursor(1);
+    eTime:=Cursor(2);
+
+    if eTime < sTime then
+        Message("Cursor 2 is before Cursor 1. Not deleting any points");
+    return 1;
+    endif
+    
+    numItems%:=ChanData(buffCSChan%,dummy[],sTime,eTime);
+    
+    if numItems% > 10 then
+        ok%:=Query(Print$("You are going to delete %d points. Are you sure you want to proceed?",numItems%));
+        if not ok% then return 1; endif
+    endif
+        
+	MemDeleteTime(buffCSChan%,3,sTime,eTime);
+    
+	return 1;
+end
+
+func RemPoint%()
+var time;
+var dummy[10000],numItems%,ok%;
+    
+	view(DataFH%);	'Make time view current
+    
+	time:=Cursor(1);
+   
+	MemDeleteTime(buffCSChan%,0,time,0.005);    'Delete nearest point to cursor 1 with 2 ms tolerance
+    
+	return 1;
+end
+
+func AddPoint%()
+var time;	'for MemImport()
+
+view(DataFH%);	'Make time view current
+
+MemSetItem(buffCSChan%,0,Cursor(1));
+
+return 1;
+end
+
+func AddPoints%()
+var sTime,eTime,mode%,time,level;	'for MemImport()
+var numItems%;								'Number of items imported to channel; will be negative if error
+var numVCursors,numHCursors%;
+const INTERVAL:=0.001;							'required interval between events
+
+view(DataFH%);	'Make time view current
+
+CursorRenumber();
+sTime:=Cursor(1); eTime:=Cursor(2);
+numHCursors%:=HCursorRenumber();
+if numHCursors% <> 1 then message("You must have one and only one horizontal cursor in the view"); return 1; endif
+level:=HCursor(1);
+
+if level = 0 then 
+    message("Please place the Horizontal cursor at an appropriate level"); 
+    Interact("Put H cursor at level desired to trigger CS",ALLOWED%);
+    level:=HCursor(1);
+endif
+
+if level > 0 then mode%:=2;	'Use waveform rising
+else mode%:=3;						'Use waveform falling
+endif
+
+numItems%:=MemImport(buffCSChan%,UNITCHAN%,sTime,eTime,mode%,INTERVAL,level);
+
+return 1;
+end
+
+func ChangeBuff%()
+'Switch active buffer to remove points from
+var numBuffs%;		'Channel number of buffer just created by MemChan(); will be zero or negative if error encountered
+var buffIndex%:=0;
+var ok%;
+
+view(DataFH%);	'Make time view current
+
+numBuffs%:=BuffChans%(buffs%[]);
+
+docase
+    
+case numBuffs% = 0 then
+    buffCSChan%:=MemChan(2);		'Make Event- channel
+    MemImport(buffCSChan%,CSCHAN%,0,MaxTime(CSCHAN%));		'Import all of CS channel
+    
+case numBuffs% = 1 then
+    buffCSChan%:=buffs%[1];
+    
+case numBuffs% > 1 then
+    StringList%(buffs%[]);
+    DlgCreate("Select a Memory Channel to remove points from");
+    DlgList(1,"CS memory channel",list$[],buffs%[0]);
+    ok%:=DlgShow(buffIndex%);
+    
+    if ok% then
+        buffCSChan%:=buffs%[buffIndex%+1];		'Add one because first element in buffs%[] is number of buffers
+    else return 1;
+    endif
+    
+else
+    Message("Error finding memory channel");
+endcase
+
+return 1;
+end
+
+
+func MakeSpkBuff%()
+var buffChanNum%;		'Channel number of buffer just created by MemChan(); will be zero or negative if error encountered
+var tStart,tEnd,mode%,time,amp,level1,level2;	'for MemImport()
+var numItems%;								'Number of items imported to channel; will be negative if error
+var numVCursors,numHCursors%;
+const INTERVAL:=0.001;							'required interval between events
+
+view(DataFH%);	'Make time view current
+
+buffChanNum%:=MemChan(3);		'Make Event+ channel
+if buffChanNum% < 0 then message("Error creating channel"); return 1; endif	'No channel created because of error
+if buffChanNum% = 0 then message("No free Memory Buffers.  Please delete one"); return 1; endif	'No channel created because no free memchannels; shouldn't happen
+
+'CursorRenumber();
+tStart:=Cursor(1); tEnd:=Cursor(2);
+numHCursors%:=HCursorRenumber();
+if numHCursors% <> 2 then message("You must have two horizontal cursors in the view"); return 1; endif
+level1:=HCursor(1);
+level2:=HCursor(2);
+
+if level1 = 0 then 
+    message("Please place the Horizontal cursors at an appropriate level"); 
+    Interact("Put H cursor at level desired to trigger CS",ALLOWED%);
+    level1:=HCursor(1);
+    level2:=HCursor(2);
+endif
+
+amp:=abs(level1-level2);
+
+'if level > 0 then mode%:=2;	'Use waveform rising
+'else mode%:=3;						'Use waveform falling
+'endif
+mode%:=1;       'Time of trough
+
+numItems%:=MemImport(buffChanNum%,UNITCHAN%,tStart,tEnd,mode%,INTERVAL,amp);
+ChanShow(buffChanNum%);
+return 1;				'Successful; Need to return 1 for toolbar
+end
+
+func WriteSpkChan%()
+var i%;
+var type%:=2;		'3=Event+; -1=append to existing chan
+var query%:=0;		'1 for don't query on overwrite, 0 for do query
+var buffChanNum%,numBuffs%;
+var numItemsWritten%;
+
+view(DataFH%);	'Make time view current
+
+numBuffs%:=BuffChans%(buffs%[]);
+if numBuffs% < 1 then message("No Memory buffers present in view"); return 1; endif
+
+for i%:=1 to numBuffs% do
+    if i% > 1 then type%:=-1; query%:=1; endif  'If writing more than one buffer, enter append mode and don't ask for confirm
+    buffChanNum%:=buffs%[i%];
+    numItemsWritten%:=MemSave(buffChanNum%,CSCHAN%,type%,query%);
+    if numItemsWritten% < 1 then message("No items written for channel %d.",buffChanNum%); endif
+next
+
+ChanTitle$(CSCHAN%,"Spikes");
+ChanShow(CSCHAN%);
+DrawMode(CSCHAN%,1,2);
+
+return 1;
+end
+
+func DelMemBuffs%()
+var numBuffs%,i%;
+
+view(DataFH%);	'Make time view current
+
+numBuffs%:=BuffChans%(buffs%[]);
+if numBuffs% < 1 then return 1; endif
+
+for i%:=1 to numBuffs% do
+    if buffs%[i%] < 101 then message("No buffers above 101.  Delete Buffers Manually"); return 1; endif	'No buffers above 101
+next
+
+ChanDelete(buffs%[]);		'Add '1' as argument to confirm non Memory Buffer deletions as failsafe
+
+return 1;
+end
+
+func SwapBuffs%()		'Swaps event data in Mem Channels so lowest numbered channel has lowest event times, etc
+var i%,numItems%,dummy%;	'counter and number of items in buffer
+var tFirst,tLast;	'Time of first and last event in buffer
+var numBuffs%,buffChanNum%,numEvnts%,lowestTmpChanNum%;		'Number of memory buffers
+var numTmpBuffs%;
+var firstChan%;
+var count%:=NUMBUFFCHANS%;				'A pseudo aribitrary number to count loops; should never reach zero
+
+view(DataFH%);	'Make time view current
+
+lowestTmpChanNum%:=MakeTempChans%();
+''' Now all original Mem channels have been moved to Memory buffers with Chan num starting at lowestTmpChanNum
+if lowestTmpChanNum% < 101 then return 1; endif 	'Something went wrong so not swapping
+
+numTmpBuffs%:=BuffChans%(buffs%[]); 	'buffs%[] contains the temporary channels
+if numTmpBuffs% < 1 then message("No temporary channels"); return 1; endif
+
+numBuffs%:=numTmpBuffs%;		'Set numBuffs now because has to be passed to FindFirstEvnt()
+while numTmpBuffs% >= 1 do
+    if count%=0 then return 1; endif 		'Just in case while loop gets out of control
+    firstChan%:=FindFirstEvnt%(numBuffs%,buffs%[],lowestTmpChanNum%);
+    numEvnts%:=MemGetItem(firstChan%);
+    tFirst:=MemGetItem(firstChan%,1);	'get time of first event
+    tLast:=MemGetItem(firstChan%,numEvnts%);	'get time of last event
+    buffChanNum%:=MemChan(3);
+    dummy%:=MemImport(buffChanNum%,firstChan%,tFirst,tLast);
+    
+    'if dummy% >= 0 then 
+    if firstChan% >= 101 then ChanDelete(firstChan%); endif		'Just to be safe, make sure it's a memory buffer
+    BuffChans%(buffs%[]); 
+    numTmpBuffs%-=numTmpBuffs%;
+    'endif
+    count%:=count%-1;
+wend
+
+BuffChans%(buffs%[]);
+ChanShow(buffs%[]);
+return 1;
+end
+
+func MakeTempChans%()	'Makes temporary channels, then deletes the original channels after moving events to the temp chans
+var i%;
+var lowestChanNum%,tmpChanNum%;
+var numBuffs%,buffChanNum%,numItems%;		'Number of memory buffers
+var tFirst,tLast;
+var dummy%;
+
+view(DataFH%);	'Make time view current
+
+numBuffs%:=BuffChans%(buffs%[]);
+if numBuffs% <= 1 then message("Only one Memory Channel.  No need to swap"); return 1; endif
+
+for i%:=1 to numBuffs% do
+    buffChanNum%:=buffs%[i%];
+    numItems%:=MemGetItem(buffChanNum%);
+    tFirst:=MemGetItem(buffChanNum%,1);	'get time of first event
+    tLast:=MemGetItem(buffChanNum%,numItems%);	'get time of last event
+    tmpChanNum%:=MemChan(3);
+    
+    if tmpChanNum% < 0 then message("Error creating channel"); return 0; endif	'No channel created because of error
+    if tmpChanNum% = 0 then message("No free Memory Buffers.  Please delete one"); return 0; endif	'No channel created because no free memchannels; shouldn't happen
+    
+    dummy%:=MemImport(tmpChanNum%,buffChanNum%,tFirst,tLast);
+    if i%=1 then lowestChanNum%:=tmpChanNum%;	endif	'So we know where the temp channels start
+next
+
+ChanDelete(buffs%[]);		'Add '1' as argument to confirm non Memory Buffer deletions as failsafe
+return lowestChanNum%;
+end
+
+func FindFirstEvnt%(numBuffs%,buffs%[],lowestChan%)
+var j%,buffChanNum%,numItems%,tFirst,firstEvntChan%,tFirstEvnt;
+
+view(DataFH%);	'Make time view current
+
+firstEvntChan%:=buffs%[numBuffs%];			'Guess that it's the last
+tFirstEvnt:=MemGetItem(firstEvntChan%,1);	'get time of first event
+
+for j%:=1 to numBuffs%-1 do					'subtract one because we don't need to check the last if none before are less
+    buffChanNum%:=buffs%[j%];
+    numItems%:=MemGetItem(buffChanNum%);
+    tFirst:=MemGetItem(buffChanNum%,1);		'get time of first event
+    if (tFirst < tFirstEvnt and buffChanNum% >= lowestChan%) then tFirstEvnt:=tFirst; firstEvntChan%:=buffChanNum%; endif
+next
+
+return firstEvntChan%;
+end
+
+func StringList%(array%[])
+'Put elements 1 through array%[0] of integer array in string array for DlgList display
+'Skip element 0, which is the number of elements in the array, like returned by ChanList()
+var i%;
+
+'Fill global list$[] with values
+for i%:=1 to array%[0] do
+    list$[i%-1]:=str$(array%[i%]);
+next
+
+return 1;
+end
+
+'************************************************************
+'Export a region (7 channels) of a data file to Text files
+'with header and summary information
+'         by Yutaka Hirata
+'            99/Jan/21
+'************************************************************
+func ExportMenu%()
+
+DataFH%:=FindOpenFile%();
+View(DataFH%);
+
+ToolBarClear();
+ToolBarSet(1,"Quit",Quit%);
+ToolBarSet(2,"Return",MainToolBar%);
+ToolBarSet(4,"&Export SMR",doSmr%);
+ToolBarSet(5,"Export TXT",doTxt%);
+
+ToolbarSet(8,"Scroll >>|0x22", ScrollForward%);	'linked to page down button
+ToolbarSet(9,"<< Scroll|0x21",ScrollBack%);		'linked to page up button
+
+ToolbarSet(10,"Get Cur&sor 1",GetCursor1%);
+ToolbarSet(11,"&Get Cursor 2",GetCursor2%);
+
+Toolbar("Running Export Script",511);
+return 1;
+
+end
+
+func doSmr%();
+
+var ok%, st, en, i%, chr%, drm%, hpos%, vpos%, sfir%, cfir%, light%, Fname$, Fnum$, numChans%;
+'var Fpath$, Fdisk$;
+var allChans%[32];				'Maximum of 32 channels
+var XtraFname$;
+
+chr%:=1;drm%:=2;hpos%:=3; vpos%:=4;sfir%:=5;cfir%:=8;	light%:=6;		'default channels
+
+'View(FrontView(0));			' make last view put on top "current view"
+DataFH%:=FindOpenFile%();
+View(DataFH%);
+Fname$:=FileName$(3);		' current view (if any)
+XtraFname$:=FileName$(4);
+Fname$:=Fname$ + XtraFname$;	'Filename without extension plus any trailing numbers
+ChanList(allChans%[]);			'Get list of all channels for cSpc%
+numChans%:=allChans%[0];	'First element contains number of channels
+
+'Fdisk$:=FileName$(1);		' Now this is done in MainToolbar%()
+'Fpath$:=FileName$(2);		' "
+'Fpath$:=Fdisk$ + Fpath$;	' "
+'FilePathSet(Fpath$);		 ' set default path to directory of current file
+'FileOpen(Fname$,0,3,"Data file to export");	' only prompts if no file is open
+'Fnum$:=FileName$(4);
+
+fDisk$:=FileName$(1);
+fPath$:=FileName$(2);
+fPath$:=fDisk$ + fPath$;
+if fPath$<>"" then
+	FilePathSet(fPath$);			' set default path to directory of current file
+endif
+
+Fnum$:=oldFnum$;
+
+var j%;
+for j%:=3 to 9 do
+    CursorDelete(j%);
+next
+
+CursorRenumber();
+st:=Cursor(1); en:=Cursor(2);
+if st=-1 then st:=1; endif
+if en=-1 then en:=6; endif
+
+DlgCreate("Export data to smr file for Matlab");
+DlgReal(1,"Start",0,Maxtime());
+DlgReal(2,"End",0,Maxtime());
+DlgCheck(3,"Interact first");
+DlgString(4,"File Suffix",30);
+ok%:=DlgShow(st,en,i%,Fnum$);
+
+if ok% then
+	'	Draw(st-.1,en-st+.2);
+	'	CursorSet(2,st,en);
+    if i%>0 then
+        ok%:=Interact("Pick a region for Export",4,0,"OK","Cancel");
+    endif
+    if ok%=1 then
+        FilePathSet("");
+        ChanProcessClear(-1);		'Clear all channel processes
+        
+        ExportChanFormat(1,1,1);
+        ExportChanFormat(4,1,1);
+        ExportChanFormat(5,1,1);
+        ExportChanFormat(8,1,1);
+        ExportChanList();
+        ExportChanList(cursor(1),cursor(2),allChans%[]);
+        FileSaveAs(Fname$ + Fnum$ + ".smr",0);
+        
+        oldFnum$:=Fnum$;
+        
+    endif
+endif
+return OK%;
+end
+
+func doTxt%();
+
+var ok%, st, en, i%, chr%, drm%, hpos%, vpos%, sfir%, cfir%, Fname$, Fnum$, numChans%;
+'var Fpath$, Fdisk$;
+var allChans%[32];				'Maximum of 32 channels
+var XtraFname$;
+
+chr%:=1;drm%:=2;hpos%:=3; vpos%:=4;sfir%:=5;cfir%:=8;
+
+'View(FrontView(0));			' make last view put on top "current view"
+View(DataFH%);
+Fname$:=FileName$(3);		' current view (if any)
+XtraFname$:=FileName$(4);
+Fname$:=Fname$ + XtraFname$;	'Filename without extension plus any trailing numbers
+ChanList(allChans%[]);			'Get list of all channels for cSpc%
+numChans%:=allChans%[0];	'First element contains number of channels
+
+'Fdisk$:=FileName$(1);		' Now this is done in MainToolbar%()
+'Fpath$:=FileName$(2);		' "
+'Fpath$:=Fdisk$ + Fpath$;	' "
+'FilePathSet(Fpath$);		 ' set default path to directory of current file
+'FileOpen(Fname$,0,3,"Data file to export");	' only prompts if no file is open
+'Fnum$:=FileName$(4);
+Fnum$:="_vor";
+'CursorRenumber();
+st:=Cursor(1); en:=Cursor(2);
+if st=-1 then st:=1; endif
+if en=-1 then en:=6; endif
+DlgCreate("Export data to text file for Matlab");
+DlgReal(1,"Start",0,Maxtime());
+DlgReal(2,"End",0,Maxtime());
+DlgCheck(3,"Interact first");
+DlgChan(4,"H. Eye Pos",1);
+DlgChan(5,"V. Eye Pos",1);
+DlgChan(6,"Chair Vel",1);
+DlgChan(7,"Drum Vel",1);
+DlgChan(8,"Simple Spike",2);
+DlgChan(9,"Complex Spike",2);
+DlgString(10,"File Suffix",20);
+ok%:=DlgShow(st,en,i%,hpos%, vpos%,chr%,drm%,sfir%,cfir%,Fnum$);
+if ok% then
+	'	Draw(st-.1,en-st+.2);
+	'	CursorSet(2,st,en);
+    if i%>0 then
+        ok%:=Interact("Pick a region for Export",4,0,"OK","Cancel");
+    endif
+    if ok%=1 then
+        FilePathSet("");
+        ChanProcessClear(-1);		'Clear all channel processes
+        
+        ExportTextFormat(1,1,1,"\""," ");
+        ExportChanFormat(1,1,1);
+        ExportChanList();
+        ExportChanList(cursor(1),cursor(2),chr%);
+        FileSaveAs("chr"+Fnum$+".txt",1);
+        
+        ExportTextFormat(1,1,1,"\""," ");
+        ExportChanFormat(1,1,1);
+        ExportChanList();
+        ExportChanList(cursor(1),cursor(2),drm%);
+        FileSaveAs("drm"+Fnum$+".txt",1);
+        
+        ExportTextFormat(1,1,1,"\""," ");
+        ExportChanFormat(1,1,1);
+        ExportChanList();
+        ExportChanList(cursor(1),cursor(2),hpos%);
+        FileSaveAs("Hpos"+Fnum$+".txt",1);
+        
+        ExportTextFormat(1,1,1,"\""," ");
+        ExportChanFormat(1,1,1);
+        ExportChanList();
+        ExportChanList(cursor(1),cursor(2),vpos%);
+        FileSaveAs("Vpos"+Fnum$+".txt",1);
+		
+        ExportTextFormat(1,1,1,"\""," ");
+        ExportChanFormat(1,1,1);
+        ExportChanList();
+        ExportChanList(cursor(1),cursor(2),sfir%);
+        FileSaveAs("fir"+Fnum$+".txt",1);
+		
+        ExportTextFormat(1,1,1,"\""," ");
+        ExportChanFormat(1,1,1);
+        ExportChanList();
+        ExportChanList(cursor(1),cursor(2),cfir%);
+        FileSaveAs("cfir"+Fnum$+".txt",1);
+        
+    endif
+endif
+
+return 1;
+
+end
+
+func MkMarkersToolbar%()
+var hcursorchannum%,hcursornum%,channum%,yahigh,yalow,yacenter;
+
+DataFH%:=FindOpenFile%();
+view(DataFH%);
+
+ToolBarClear();
+ToolBarSet(1,"Quit",Quit%);
+ToolBarSet(2,"Return",MainToolBar%);
+ToolBarSet(4,"Make Markers",MkMarkers%);
+ToolBarSet(5,"Change Markers",ChgMarkers%);
+ToolBarSet(7,"Set Marker code",SetMarkerCode%);
+ToolbarSet(8,"Fetch &H Cur 1",FetchHCurs%);
+
+ToolbarSet(9,"Scroll >>|0x22", ScrollForward%);	'linked to page down button
+ToolbarSet(10,"<< Scroll|0x21",ScrollBack%);		'linked to page up button
+
+channum%:=VisibleChan%(1);
+if channum% < 1 then
+    channum%:=1;
+endif
+
+hcursorchannum%:=HCursorChan(1);
+
+yahigh:=YHigh(channum%);
+yalow:=YLow(channum%);
+yacenter:=yalow+(yahigh-yalow)/2.0;
+
+if hcursorchannum% < 1 then    
+    hcursornum%:=HCursorNew(channum%,yacenter);
+    HCursor(1,yacenter,channum%);  'Place H cursor 1 on channel at 0 deg
+    hcursorchannum%:=HCursorChan(1);
+endif
+
+
+'hcursorchannum%:=HCursorChan(1);
+'
+'if hcursorchannum% < 1 then
+'    channum%:=VisibleChan%(1);
+'    if channum% < 1 then
+'        channum%:=1;
+'    endif
+'    hcursornum%:=HCursorNew(channum%,0);
+'    HCursor(1,0,channum%);  'Place H cursor 1 on channel 1 at 7.5 deg
+'    hcursorchannum%:=HCursorChan(channum%);
+'endif
+
+'Set manual mark selection flag to zero since we're automatically selecting
+MKSELECTED%:=0;
+'Guess values of code based on channel containing h cursor
+docase
+    case hcursorchannum%=1 then mkcodestr$:="C";
+    case hcursorchannum%=2 then mkcodestr$:="K";
+    case hcursorchannum%=9 then mkcodestr$:="P";
+    case hcursorchannum%=10 then mkcodestr$:="P";
+endcase
+
+
+Toolbar("Position Horizontal Cursor 1 to detect movement of stimulus.",ALLOWED%);
+
+return 1;
+
+end
+
+func FetchHCurs%()
+var hcursorchannum%,hcursornum%,channum%,yahigh,yalow,yacenter;
+
+DataFH%:=FindOpenFile%();
+view(DataFH%);
+
+channum%:=VisibleChan%(1);
+if channum% < 1 then
+    channum%:=1;
+endif
+
+yahigh:=YHigh(channum%);
+yalow:=YLow(channum%);
+yacenter:=yalow+(yahigh-yalow)/2.0;
+
+hcursorchannum%:=HCursorChan(1);
+
+if hcursorchannum% < 1 then    
+    hcursornum%:=HCursorNew(channum%,yacenter);
+endif
+
+HCursor(1,yacenter,channum%);  'Place H cursor 1 on channel at 0 deg
+hcursorchannum%:=HCursorChan(1);
+
+'channum%:=VisibleChan%(1);
+'if channum% < 1 then
+'    channum%:=1;
+'endif
+'
+'hcursornum%:=HCursorNew(channum%,0);
+'hcursorchannum%:=HCursor(1,0);
+
+return 1;
+end
+
+func VisibleChan%(types%) 
+'Return the lowest numbered visible channel of type% (type% can be sum of bits as described in help file for ChanList())
+var channum%,n%,i%;
+var chans%[32],visiblechans%[32],visible%,j%;
+
+ChanList(chans%[],types%);
+n%:=chans%[0];
+
+for i%:=1 to n% do
+    visible%:=ChanVisible(chans%[i%]);
+    if visible% then
+        visiblechans%[j%]:=chans%[i%];
+        j%:=j%+1;
+    endif
+    next
+
+'We check all channels rather than returning after the first hit so this function can be expanded to return all visible 
+'chans at a later date.
+channum%:=visiblechans%[0];
+
+return channum%;
+end
+
+
+func SetMarkerCode%()
+'Make dialog box to change marker code
+var ok%;
+
+DlgCreate("Set marker code");
+DlgString(1,"Marker code to use",1,"",0,0,"P|C|D|L|K");
+
+ok%:=DlgShow(mkcodestr$);
+if ok% then    
+    'Set manual mark selection flag to 1 so we don't override automatically
+    MKSELECTED%:=1;
+endif
+
+return 1;
+end
+
+func ChgMarkers%()
+var c1,c2;
+var ok%;
+
+c1:=Cursor(1);
+c2:=Cursor(2);
+
+' A few sanity checks
+if c1 = -1 or c2 = -1 then
+    Message("Please place cursors 1 and 2 around range to convert.");
+    return 1;
+endif
+
+if c2 < c1 then
+    swap(c2,c1);
+endif
+
+if c2-c1 > 120 then
+    ok%:=Query("You are about to change marker codes for over 2 minutes of data. Are you sure you want to proceed?");
+    if ok% < 1 then
+        return 1;
+    endif
+endif
+
+MarkMask(CODECHAN%,0,0,-1);    'Exclude everything
+MarkMask(CODECHAN%,0,1,"CDLPK");   'Include only "Cycle markers"
+MarkSet(CODECHAN%,Cursor(1),Cursor(2),Asc(mkcodestr$)); 'Set to desired code
+MarkMask(CODECHAN%,0,1,-1);    'Turn all back on
+
+return 1;
+end
+
+func MkMarkers%()
+'Make marker codes for a stimulus channel, e.g. chair, drum, laser
+
+var st,ed;
+var thresh;
+var stimchan%;
+var mkbuff%;
+var numItems%;
+var mode%;
+var ok%;
+
+thresh:=HCursor(1);		
+
+st:=Cursor(1);
+ed:=Cursor(2);
+
+' Sanity checks
+if HCursorChan(1) < 1 then
+    Message("Please place H cursor 1 at trigger level for stimulus.");
+    return 1;
+endif
+
+if st < 1 or ed < 1 then
+    Message("Please place cursors 1 and 2 around range in which to make markers.");
+    return 1;
+endif
+
+if st > ed then
+    swap(st,ed);
+endif
+
+stimchan%:=HCursorChan(1);
+
+'Autoselect marker code based on channel if user hasn't specified a code already
+if MKSELECTED%=0 then
+    docase
+    case stimchan%=1 then mkcodestr$:="C";
+    case stimchan%=2 then mkcodestr$:="K";
+    case stimchan%=9 then mkcodestr$:="P";
+    case stimchan%=10 then mkcodestr$:="P";
+    endcase
+endif
+
+
+'Smooth Stim channels to avoid false triggers from noisy data
+if stimchan% = HLzChan% then
+    ChanProcessAdd(HlzChan%,1,0.02);
+endif
+
+if stimchan% = VlzChan% then
+    ChanProcessAdd(VlzChan%,1,0.02);
+endif
+
+if stimchan% = ChrChan% then
+    ChanProcessAdd(ChrChan%,1,0.02);
+endif
+
+if stimchan% = DrmChan% then
+    ChanProcessAdd(DrmChan%,1,0.02);
+endif
+
+MarkMask(CODECHAN%,0,1,-1);    'Turn on all marker codes
+
+mkbuff%:=MemChan(0,CODECHAN%);			'Make marker channel by copying settings from chan 32
+ChanShow(mkbuff%);
+numItems%:=MemImport(mkbuff%,CODECHAN%,0,MaxTime());
+if numItems% < 1 then
+    ok%:=Query("No existing marker codes found on default code channel. Are you sure you're using the right channel and wish to Continue?");
+    if ok% < 1 then
+        return 1;
+    endif
+endif
+
+if thresh < 0 then
+    mode%:=3;
+else
+    mode%:=2;
+endif
+
+numItems%:=MemImport(mkbuff%,stimchan%,st,ed,mode%,0.1,thresh,Asc(mkcodestr$));
+
+if numItems% < 1 then
+    Message("No threshold crossings detected. Marker channel not changed.");
+    return 1;
+endif
+
+MarkMask(mkbuff%,0,0,-1);    'Exclude everything
+MarkMask(mkbuff%,0,1,Asc(mkcodestr$));   'Include only "Cycle markers"
+
+ok%:=Query("Are markers correctly set? If no, press cancel and manually edit.");
+if ok% < 1 then
+    return 1;
+endif
+
+MarkMask(mkbuff%,0,1,-1);    'Turn on all marker codes
+
+numItems%:=MemSave(mkbuff%,CODECHAN%,0);
+
+ChanShow(CODECHAN%);
+
+if numItems% >=0 then
+    ChanDelete(mkbuff%);
+endif
+
+'Remove smooth of Stim channels
+if stimchan% = HLzChan% then        
+    ChanProcessClear(HlzChan%,-1);
+endif
+
+if stimchan% = VLzChan% then
+    ChanProcessClear(VlzChan%,-1);
+endif
+
+if stimchan% = ChrChan% then
+    ChanProcessClear(ChrChan%,-1);
+endif
+
+if stimchan% = DrmChan% then
+    ChanProcessClear(DrmChan%,-1);
+endif
+
+return 1;
+end
+
+'func MkMarkers%()
+''This is the old version of the MkMarkers function used with step data in untrained monkeys
+'
+'var st,ed;
+'var hi,lo;
+'var t1,t2,tlast;
+'var lton,ltoff;
+'var state1,state2;
+'var mkbuff%;
+'var numItems%;
+'var ok%;
+'
+'DlgCreate("Make marker channel for Chair start time");
+'DlgString(1,"Up mark",1);		'Maximum one character
+'DlgString(2,"Down mark",1);
+'DlgChan(3,"Light Channel",4);
+'DlgReal(4,"Step Time",0.0,30.0);
+'DlgReal(5,"Buffer period (light time constant)",0.0,1.0);
+'
+'ok%:=DlgShow(upcode$,dncode$,lightchan%,steptime,bufftime);
+'
+'if ok% = 0 then
+'    return 1;
+'endif
+'
+'
+'hi:=HCursor(1);			
+'lo:=HCursor(2);			
+'
+'st:=Cursor(1);
+'ed:=Cursor(2);
+'
+'ChanHide%();
+'
+'XRange(st-5,ed+5);
+'
+'hi:=HCursor(1);
+'lo:=HCursor(2);
+'
+'if lo > hi then
+'    swap(lo,hi);
+'endif
+'
+'mkbuff%:=MemChan(5);			'Make marker channel
+'numItems%:=MemImport(mkbuff%,1,st,ed,2,steptime,hi,Asc(upcode$));		'2= rising through level
+'numItems%:=MemImport(mkbuff%,1,st,ed,3,steptime,lo,Asc(dncode$));		'3= falling through level
+'
+'MarkMask(mkbuff%,0);          'Mode=0, "AND" mode
+'
+'tlast:=LastTime(lightchan%,ed);
+'
+'while 1 do
+'    
+'    'Find light on/off times
+'    t1:=NextTime(lightchan%,st,state1);
+'    if state1 = 0 then 'low to high
+'        ltoff:=t1;
+'    else
+'        t1:=NextTime(lightchan%,st,state1);
+'        if state1 = 0 then
+'            ltoff:=t1;
+'        else
+'            return 1;
+'        endif
+'    endif
+'    
+'    t2:=NextTime(lightchan%,t1,state2);
+'    if state2 = 1 then
+'        lton:=t2;
+'    else
+'        return 1;
+'    endif
+'    
+'    'Turn on up, off down mark
+'    MarkMask(mkbuff%,0,1,Asc(upcode$));  'Third argument: 1 to include, 0 to exclude code
+'    MarkMask(mkbuff%,0,0,Asc(dncode$));  
+'    'Change markers in range
+'    MarkSet(mkbuff%,ltoff+bufftime,lton-12*bufftime-steptime,Asc("D"));
+'    
+'    'Turn on down, off up dark mark
+'    MarkMask(mkbuff%,0,1,Asc(dncode$));  
+'    MarkMask(mkbuff%,0,0,Asc("D"));  
+'    'Change markers in range
+'    MarkSet(mkbuff%,ltoff+bufftime,lton-7*bufftime-steptime,Asc("d"));
+'    
+'    'Turn both back on
+'    MarkMask(mkbuff%,0,1,Asc(dncode$));  
+'    MarkMask(mkbuff%,0,1,Asc(upcode$));  
+'    'Turn off dark markers
+'    MarkMask(mkbuff%,0,0,Asc("D"));  
+'    MarkMask(mkbuff%,0,0,Asc("d"));  
+'    
+'    MarkSet(mkbuff%,ltoff-bufftime-steptime,lton+bufftime,0);		'Set markers during transition time to zero
+'    
+'    'Turn dark markers back on
+'    MarkMask(mkbuff%,0,1,Asc("D"));  
+'    MarkMask(mkbuff%,0,1,Asc("d"));  
+'    
+'    'Turn '00' marker off
+'    MarkMask(mkbuff%,0,0,0);
+'    
+'    st:=t2;
+'    
+'    if st >= tlast then
+'        ChanShow(mkbuff%);
+'        return 1;
+'    endif
+'    
+'wend
+'
+'end
+
+func swap(&e1,&e2)
+'Swap two elements
+
+var tmp;
+
+tmp:=e1;
+e1:=e2;
+e2:=tmp;
+
+return 1;
+
+end
+
+func CalHEye%()
+var v1,v2;			'Values of laser at t1 and t2	
+
+MakeCurrent%();
+
+v1:=ChanValue(HLzChan%,Cursor(1));
+v2:=ChanValue(HLzChan%,Cursor(2));
+
+ChanCalibrate(HEyeChan%,1,1,Cursor(1),Cursor(2),"deg",v1,v2);		'Calibrate and save to configuration
+
+HEyeScale:=ChanScale(HEyeChan%);
+HEyeOffset:=ChanOffset(HEyeChan%);
+
+view(DataFH%).YRange(HEyeChan%,view(DataFH%).YLow(HLzChan%),view(DataFH%).YHigh(HLzChan%));
+
+return 1;
+end
+
+func CalVEye%()
+var v1,v2;			'Values of laser at t1 and t2	
+
+MakeCurrent%();
+
+v1:=ChanValue(VLzChan%,Cursor(1));
+v2:=ChanValue(VLzChan%,Cursor(2));
+
+ChanCalibrate(VEyeChan%,1,1,Cursor(1),Cursor(2),"deg",v1,v2);		'Calibrate and save to configuration
+
+VEyeScale:=ChanScale(VEyeChan%);
+VEyeOffset:=ChanOffset(VEyeChan%);
+
+view(DataFH%).YRange(VEyeChan%,view(DataFH%).YLow(VLzChan%),view(DataFH%).YHigh(VLzChan%));
+
+return 1;
+end
+
+
+func Params%() 'For fine adjustment of eye parameters and general bar parameters
+var ok%;
+var tmpHScale,tmpHOffset,tmpVScale,tmpVOffset;
+
+MakeCurrent%();
+
+view(DataFH%);
+
+tmpHScale:=ChanScale(HeyeChan%);
+tmpHOffset:=ChanOffset(HeyeChan%);
+tmpVScale:=ChanScale(VeyeChan%);
+tmpVOffset:=ChanOffset(VeyeChan%);
+
+DlgCreate("Eye Parameters");  
+DlgReal(1,"Horizontal scale",-200.0,200.0);
+DlgReal(2,"Horizontal offset",-180.0,180.0);
+DlgReal(3,"Vertical scale",-200.0,200.0);
+DlgReal(4,"Vertical offset",-180.0,180.0);
+
+DlgAllow(ALLOWED%);
+
+ok%:=DlgShow(tmpHScale,tmpHOffset,tmpVScale,tmpVOffset);
+
+HEyeScale:=tmpHScale;
+HEyeOffset:=tmpHOffset;
+VEyeScale:=tmpVScale;
+VEyeOffset:=tmpVOffset;
+
+if ok% then
+    ChanScale(HeyeChan%,HEyeScale);
+    ChanOffset(HeyeChan%,HEyeOffset);
+    ChanScale(VeyeChan%,VEyeScale);
+    ChanOffset(VeyeChan%,VEyeOffset);   
+    view(DataFH%).Optimise(HEyeChan%);
+    view(DataFH%).Optimise(VEyeChan%);
+ 
+endif
+
+return 1;
+end
+
+func iseven%(num%)
+
+if num% mod 2 = 0 then
+    return 1;
+else return 0;
+endif
+
+end
+
+func isodd%(num%)
+
+if num% mod 2 = 1 then
+    return 1;
+else return 0;
+endif
+
+end

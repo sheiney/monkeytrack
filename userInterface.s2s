@@ -1,0 +1,4861 @@
+'Original program written August 20, 2006 by Shane
+'Use with "taskSequencer.pls"
+'Training and recording program for visual tasks
+'Implements fixation, saccade, ramp pursuit, sine pursuit
+'Dual monitor support
+'Eye in window tracking added in version 7.1
+'Eccentric pursuit and UI improvements in version 7.2
+'Simplified interaction with chair/drum added in version 7.3
+'Sequencer variable numbers changed in version 7.3
+'Implements step-ramp pursuit
+'Version 7.5 implements laser movement with Chair for VORL
+'Version 7.6 implements sequential saccades, full length pursuit and minor changes
+'Version 7.7 implements out-and-back saccades
+'Version 7.8 adds random fix time as implemented by Kay
+'Version 8.0 implements better online processing of behavioral data (e.g., saccade latencies)
+'Version 8.1 adds online spike discrimination using Hcursor on unit channel
+'Version 8.2 adds online crosstalk compensation, including at the sequencer level
+'Version 8.3 cleans up interface a little to remove bar press-specific components
+'Version 8.4 changes the crosstalk compensation technique to do all calibrations in virtual channels
+'        8.4.3 adds report of cumulative reward durations
+'Version 8.5 started to implement new EIW routine but was scrapped and never completed.
+'Version 8.6 picks up with new EIW routine, adds the target interception prediction task, cleans up the dialog boxes,
+'            adds eccentric positions to ramp pursuit and sequential saccades, and fixes VORL, VORC, and F-WFS so they
+'            with an earth-fixed laser and back-projected drum. 
+'Version 8.7 
+
+'Circular pursuit not yet implemented
+
+
+'%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+'Requires Spike2 v5.06 or better %
+'%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+'Load user-specific constants and variables (that depend on specic rig used)
+#include "include\uservars.s2s"
+
+'Sequencer file should be in same directory as script (this is different than previous versions of the program)
+const SeqFileName$:="taskSequencer.pls";
+
+var SeqFile$; SeqFile$:=SeqFileRootDir$+SeqFileName$;
+
+var ROOTDIR$:=ROOTBEHDIR$;
+
+const PI:=3.1415926535897932384626433832795;
+
+var Hcompeyeposchan%:=0;        'Eye position channel compensated for crosstalk
+var Vcompeyeposchan%:=0;        'Eye position channel compensated for crosstalk
+var Heyevelchan%:=0;
+var Veyevelchan%:=0;
+var spikememchan%:=0;
+
+var Hcursnum%:=0;           'For spike discrimination
+var SpkDiscrimMemChans%[100];   '100 channels set aside for discriminated events (this is a workaround since Spike2 makes us create a new mem channels whenever we change the MeasureToChan() settings
+var SpkDiscrimMemChansUsed%:=0;
+
+const ALLOWED%:=512+256+128+64+32+16+8+4+2+1;
+const MAXTRIALS%:=10000;
+const TABLELENGTH%:=100;    'Number of rows in sequencer table (# of columns determined by the number of different parameters to pass)
+
+const GOOD%:=1;
+const BAD%:=0;
+
+const P1401%:=1;		'Connected to 1401?
+var BUG%:=0;			'DeBUG% mode    (now used as toggle switch, used to be constant)
+
+'Constants for toolbar positions
+const closealltb%:=2;   'new file and close all toolbar are same (close all stops sampling)
+const newfiletb%:=2;
+const writetb%:=4;
+const paramstb%:=5;
+const calhtb%:=6;
+const calvtb%:=7;
+const starttb%:=8;
+const resettb%:=9;
+const stoptb%:=10;
+const fixatetb%:=12;
+const seqsaccadetb%:=13;
+const saccadetb%:=14;
+const rpursuittb%:=15;
+const predicttb%:=16;
+const spursuittb%:=17;
+const sOKStb%:=18;
+const scanceltb%:=19;
+const sVORtb%:=20;
+const advancetb%:=22;
+const hometb%:=23;
+const mtenabletb%:=25;
+const mtdisabletb%:=24;
+const monitorstb%:=21;
+const debugtb%:=27;
+const possnaketb%:=29;
+const toggleeyeveltb%:=31;
+const spikediscrimtb%:=32;
+const serialctrltb%:=33;
+
+
+'View handles for all open windows
+var vh%;							'Time view handle
+var Stath%;						'view handle for statistics (not used)
+var lh%;
+'var r1h%;							'view handle for raster plot 1 (trigger = trial Start)
+'var r2h%;							'view handle for raster plot 2 (trigger = Bright on)
+var XYh%;							'view handle for XY eye position plot
+'var errvh%;							'view handle for error rate histogram
+'
+'Variables for serial communication with Kollmorgen controllers
+var err%:=0;					'Multipurpose variable holding number of most recent error
+var errStr$;					'String to hold error message converted by Error$(err%)
+var serStr$;					'String read from serial port
+var serialOpen%:=0;				'Is serial port open?
+
+'Variables for fixation
+var fITI%:=50;
+var fITIB%:=1;
+var fholdtm%:=1200;
+var frandholdtm%:=0;
+var frewtm%:=25;
+var fTkwinsz:=3;
+var fLzPos:=10;
+var fRAND%:=1;     '0=block, 1=random
+var fdirs%[9];		'Directions to use (ordering is left to right and top to bottom--up/left=0,center=4,down/right=8)
+
+fdirs%[0]:=0;
+fdirs%[1]:=0;
+fdirs%[2]:=0;
+fdirs%[3]:=0;
+fdirs%[4]:=1;
+fdirs%[5]:=0;
+fdirs%[6]:=0;
+fdirs%[7]:=0;
+fdirs%[8]:=0;
+
+'Dialog Item numbers for toggling ON/OFF all fixation points
+var fCheckToggle%:=0;
+var fCheckItemToggle%;
+var fCheckItemStart%;
+var fCheckItemEnd%;
+
+'Varibles for sequential saccade
+'Variables for fixation
+var sqITI%:=500;
+var sqITIB%:=500;
+var sqholdtm%:=2000;
+var sqfixtm%:=2000;
+var sqrewtm%:=40;
+var sqFxwinsz:=3;
+var sqTkwinsz:=3;
+var sqLzStart:=-10;
+var sqLzStep:=5;
+var sqLzEnd:=10;
+var sqLzHOffset:=0;
+var sqLzVOffset:=0;
+var sqMODE%:=0;     '0=Horizontal, 1=Vertical
+var sqSIMPLE%:=0;   'Use simple mode (i.e. single jump, don't specify step size)
+var sqdelayeiw%:=400;			'Delay after laser jump before program starts checking for bar/EIW
+
+
+'Variables for saccade
+var sITI%:=500;
+var sITIB%:=1;
+var sholdtm%:=1000;
+var sfixtm%:=1200;
+var srandfixtm%:=500;
+var srandholdtm%:=0;
+var srewtm%:=50;
+var sTkwinsz:=4;
+var sFxwinsz:=2;
+var sLzPos:=10;
+var sLzHOffset:=0;
+var sLzVOffset:=0;
+var sRAND%:=1;     '0=block, 1=random, 2=sequential (2 not used --> separate menu for sequential)
+var sMODE%:=0;      '0=Centrifugal, 1=Centripetal, 2=out-and-back
+var sdirs%[9];		'Directions to use (ordering is left to right and top to bottom--up/left=0,center=4,down/right=8)
+var sdelayeiw%:=400;			'Delay after laser jump before program starts checking for bar/EIW
+
+sdirs%[0]:=0;
+sdirs%[1]:=1;
+sdirs%[2]:=0;
+sdirs%[3]:=1;
+sdirs%[4]:=0;
+sdirs%[5]:=1;
+sdirs%[6]:=0;
+sdirs%[7]:=1;
+sdirs%[8]:=0;
+
+'Variables for ramp pursuit
+var rpITI%:=500;
+var rpITIB%:=1;
+var rpholdtm%:=1500;
+var rpfixtm%:=1000;
+var rprandfixtm%:=500;
+var rprandholdtm%:=0;
+var rprewtm%:=60;
+var rpTkwinsz:=3;
+var rpFxwinsz:=3;
+var rpLzPos:=10;
+var rpLzHOffset:=0;
+var rpLzVOffset:=0;
+var rpLzVel:=20;
+var rpRAND%:=1;     '0=block, 1=random
+var rpMODE%:=2;     '0=Centrifugal, 1=Centripetal, 2=FullLength
+var rpdirs%[8];		'Directions to use (ordering is left to right and top to bottom--up/left=0,no center,down/right=7)
+var rpdelayeiw%:=200;			'Delay after laser jump before program starts checking for bar/EIW
+var rpeyedelay%:=180;   'Delay for oculomotor system to start pursuit (zero disables step-ramp)
+
+rpdirs%[0]:=0;
+rpdirs%[1]:=0;
+rpdirs%[2]:=0;
+rpdirs%[3]:=1;
+rpdirs%[4]:=1;
+rpdirs%[5]:=0;
+rpdirs%[6]:=0;
+rpdirs%[7]:=0;
+
+'Variables for sine pursuit
+var spITI%:=50;
+var spITIB%:=1;
+var spholdtm%:=1500;
+var spfixtm%:=500;
+var sprandholdtm%:=500;
+var sprewtm%:=50;
+var spTkwinsz:=3;
+var spFxwinsz:=2.5;
+var spLzPos:=10;     'Max laser position displacement from starting position
+var spLzFreq:=0.4;  'Velocity calculated from laser displacement and frequency
+var spLzVel; spLzVel:=spLzPos*spLzFreq*PI;  'Laser velocity only used to calculate positional displacement given desired frequency and velocity
+var spLzOffset:=0.0;'Laser eccentric position
+var spRAND%:=1;     '0=block, 1=random
+var spMODE%:=0;     '0=Pure horizontal, 1=Pure vertical, {2=Circular-->not implemented yet}
+var spdirs%[5];		'Starting position to use (ordering is left to right and top to bottom--up=0,center=2,down=4)
+var spdelayeiw%:=200;			'Delay after laser jump before program starts checking for bar/EIW
+
+spdirs%[0]:=0;
+spdirs%[1]:=0;
+spdirs%[2]:=1;
+spdirs%[3]:=0;
+spdirs%[4]:=0;
+
+'Variables for sine VOR
+var svITI%:=500;
+var svITIB%:=1;
+var svholdtm%:=1000;
+var svfixtm%:=500;
+var svrandholdtm%:=0;
+var svrewtm%:=40;
+var svTkwinsz:=4;
+var svFxwinsz:=2;
+var svChrPos%:=10;     'Max chair position displacement from starting position (must be integer)
+var svChrFreq:=0.4;  'Velocity calculated from chair displacement and frequency
+var svChrVel; svChrVel:=svChrPos%*svChrFreq*2*PI;  
+var svLzOffset:=0;     'This is actually more appropriately called LzOffset
+var svRAND%:=1;     '0=block, 1=random
+var svdirs%[5];		'Starting position to use (ordering is left to right and top to bottom--up=0,center=2,down=4)
+var svdelayeiw%:=200;			'Delay after chair start before program starts checking for bar/EIW
+var svCOND%:=0;      'Laser only=0,laser+OKS=1,nothing (VORd)=2
+
+svdirs%[0]:=0;
+svdirs%[1]:=0;
+svdirs%[2]:=1;
+svdirs%[3]:=0;
+svdirs%[4]:=0;
+
+'Variables for sine VORC
+var scITI%:=500;
+var scITIB%:=1;
+var scholdtm%:=1000;
+var scfixtm%:=1000;
+var scrandholdtm%:=0;
+var screwtm%:=40;
+var scTkwinsz:=3;
+var scFxwinsz:=2;
+var scChrPos%:=10;     'Max chair position displacement from starting position (must be integer)
+var scChrFreq:=0.4;  'Velocity calculated from chair displacement and frequency
+var scChrVel; svChrVel:=svChrPos%*svChrFreq*2*PI;  
+var scLzOffset:=0;
+var scLzCorrection:=0;
+var scRAND%:=1;     '0=block, 1=random
+var scdirs%[5];		'Starting position to use (ordering is left to right and top to bottom--up=0,center=2,down=4)
+var scdelayeiw%:=200;			'Delay after chair start before program starts checking for bar/EIW
+var scCOND%:=0;      'Laser only=0,laser+OKS=1,nothing (VORd)=2
+
+scdirs%[0]:=0;
+scdirs%[1]:=0;
+scdirs%[2]:=1;
+scdirs%[3]:=0;
+scdirs%[4]:=0;
+
+'Variables for sine OKS
+var soITI%:=500;
+var soITIB%:=1;
+var soholdtm%:=500;
+var sofixtm%:=500;
+var sorandholdtm%:=0;
+var sorewtm%:=80;
+var soTkwinsz:=3;
+var soFxwinsz:=2;
+var soDrmPos%:=10;     'Max drum position displacement from starting position (must be integer)
+var soDrmFreq:=0.4;  'Velocity calculated from drum displacement and frequency
+var soDrmVel; soDrmVel:=soDrmPos%*soDrmFreq*2*PI;  
+var soLzPos:=0;     'More appropriately called LzOffset
+var soRAND%:=1;     '0=block, 1=random
+var sodirs%[5];		'Starting position to use (ordering is left to right and top to bottom--up=0,center=2,down=4)
+var sodelayeiw%:=200;			'Delay after chair start before program starts checking for bar/EIW
+var soCOND%:=1;      'OKS only=0,laser+OKS=1
+
+sodirs%[0]:=0;
+sodirs%[1]:=0;
+sodirs%[2]:=1;
+sodirs%[3]:=0;
+sodirs%[4]:=0;
+
+'Variables for prediction
+var prdITI%:=500;
+var prdITIB%:=1;
+var prdfixtm%:=500;
+var prdrandfixtm%:=300;
+var prdstattm%:=500;
+var prdrandstattm%:=0;
+var prdmovtm%:=500;
+var prdrandmovtm%:=0;
+var prdholdtm%:=1000;
+var prdrandholdtm%:=0;
+var prrewtm%:=80;
+var prdTkwinsz:=3;
+var prdFxwinsz:=3;
+var prdlzpos:=15;
+var prdLzVel:=10;
+var prdRAND%:=1;     '0=block, 1=random
+var prdMODE%:=2;     '0=Centrifugal, 1=Centripetal, 2=FullLength
+var prddirs%[8];		'Directions to use (ordering is left to right and top to bottom--up/left=0,no center,down/right=7)
+var prddelayeiw%:=200;			'Delay after laser jump before program starts checking for bar/EIW
+var prdeyedelay%:=0;   'Delay for oculomotor system to start pursuit (zero disables step-ramp)
+var prdfix%[2];
+var prdmov%[2];
+var prdstat%[2];
+var prdhold%[2];
+var prdoffsets[2];
+
+prdfix%[0]:=prdfixtm%;          'Base time
+prdfix%[1]:=prdrandfixtm%;      'Random time
+prdstat%[0]:=prdstattm%;        'Base time
+prdstat%[1]:=prdrandstattm%;    'Random time
+prdmov%[0]:=prdmovtm%;          'Base time
+prdmov%[1]:=prdrandmovtm%;      'Random time
+prdhold%[0]:=prdholdtm%;        'Base time
+prdhold%[1]:=prdrandholdtm%;    'Random time
+
+var prdminrange;
+var prdmaxrange;
+var prdRangeText$:=" ";
+var prdRangeTextID%;    'Item number returned from DlgText() function for use in callback
+
+prddirs%[0]:=0;
+prddirs%[1]:=0;
+prddirs%[2]:=0;
+prddirs%[3]:=1;
+prddirs%[4]:=1;
+prddirs%[5]:=0;
+prddirs%[6]:=0;
+prddirs%[7]:=0;
+
+
+var rewdly%:=10;			'Delay before reward in ms
+var rewinctm%:=15;           'Increment reward duration by this amount each correct trial (ms)
+var fixtm%:=500;        'Fixation time + hold time = total hold time
+'Animal fixes for fix time before all tasks but fixation start
+var tkwinsz:=3;				'Task window radius in degrees (square window)
+var fxwinsz:=2;				'Fixation window radius in degrees (square window)
+'Note: sequencer assumes that H and V laser scales are equal, otherwise two window sizes would be needed
+var smrew%:=150;
+var bgrew%:=300;
+var bgrewpcnt%:=0;
+var SKIPREWARD%:=0;     'Sequencer flag to skip reward on a trial, e.g. during seq sac
+
+'Calibrations for script
+'All calibration for eye is now done in virtual channels (as of version 8.4).
+'These are the values used in the virtual channel equations. 
+'Raw eye channels are automatically set to 1 gain, 0 offset.
+var HEyeScale:=1;
+var HEyeOffset:=0;
+var VEyeScale:=1;
+var VEyeOffset:=0;
+
+var heyecrossgain:=0;  'Crosstalk compensation gains (i.e., percentage of eye position to be subtracted from orthogonal direction)
+var veyecrossgain:=0;
+
+'''''CONVERSION NEEDS TO BE UPDATED FOR DIFFERENCE IN DISTANCE BETWEEN EYE AND LASER'''''''''
+'----------------- Conversion values for eye in window routine in sequencer ----------------'
+'Note: Laser bits (DAC units) are the base values that eye positions are compared to.
+'Thus, in the sequencer we need to convert our sampled eye channel values (from CHAN operation)
+'to laser-based units.  We do this by creating a scale value in the script and passing it to the 
+'sequencer.  To avoid massive roundoff errors we multiply the scale by 128 (shift 7 bits) in the 
+'script, so we need to divide our final converted eye positions in the sequencer by 128 before 
+'comparing to the laser positions.  
+
+var HEyeScaleConversion:=1;
+var HEyeOffsetConversion:=0;
+var VEyeScaleConversion:=1;
+var VEyeOffsetConversion:=0;
+
+'Movement related variables
+var ParamTable%[TABLELENGTH%*13];	'Master table that sets task parameters
+
+
+'NOTE: Are these still used???
+var LzPos:=5;
+var LzVel:=5;	'Velocity of laser (could also control horizontal and vert separately)
+
+var tTask$:="";     'String holding name of task for writing to text channel
+var oldtTask$:="";  'String holding name of last task for comparison with currently selected one
+
+var tGrace%:=100;  'Grace period before bad trial in msec
+
+'Flags
+var SKIPWT%:=3;			'Skip bar release waiting periods (don't set <1, >=2 skips initial bar release requirement)
+var TASK%:=0;				'0=stopped,1=fixate,2=saccade,3=ramp pursuit, 4=sine pursuit, 5=sine cancel, 7=VORD 
+var LZDIR%:=0;				'0=center (not used?)
+var EYE%:=0;				'0=using eye in window w/ trials (default), 1=using eye in window continuous (NOTE: bar no longer used)
+var REWRAND%:=0;            '0=don't randomize, 1=randomize reward value (Reward time in dialogs is maximum reward time; 25 msec is min)
+
+var numtrl:=0;
+var numgood:=0;
+'Task trial count
+'These are set to the current values of numtrl and numgood whenever a new task is started. This way the number of task-specific trials 
+'can be calculated by subtraction (see IdleProc%())
+var numtrloffset:=0;
+var numgoodoffset:=0;
+
+var oldt,now,searchstart;				'For timing idleproc
+var Tindex%;                        'Trial counter for rasters and % correct trend plot
+var shorttimers,shorttimere;	'Shorter timer for plotting eye position in XY view during idle proc
+var last1t,last2t;		'Times of last raster sweeps
+var trig1[MAXTRIALS%];			'Set aside large arrays for triggers
+var trig2[MAXTRIALS%];
+var sweep1%:=1;					'Value of current sweep for raster 1
+var sweep2%:=1;					'Value of current sweep for raster 2
+var pre1:=0,post1:=3;				'Pre-trigger and post-trigger times for raster 1
+var pre2:=0,post2:=1;				'Pre-trigger and post-trigger times for raster 2
+var ERbinsz%:=15;					'Number of trials to average for error rate histogram
+
+var totalRewDur:=0;
+var currentrewchecktm:=0;
+var prevrewchecktm:=0;
+
+var sacthresh:=100;     'Threshold velocity to use for finding saccades (will find peaks above this value)
+var sacmaxdelay:=1;   'Maximum latency to consider when searching for saccades
+
+var heyedupchan%;       'Channel number of duplicate H eye chan
+var veyedupchan%;       'Channel number of duplicate V eye chan
+var eyevectchan%;       'Channel number of virtual channel containing eye vector
+var trialstartchan%;     'Channel number containing trial start markers
+var trialgoodchan%,trialbadchan%;      'Channel number containing trial outcome markers (r or x)
+var trialrxnchan%;      'Channel number containing trial reaction markers (u for bar, otherwise not used)
+var latencychan%;       'Channel to hold behavioral events such as saccades
+
+var eyemax:=40;
+
+var EyePosDataLen%:=10;  'Size of XY eye position plot (10 data points at 50 Hz sampling = 500 milliseconds of data)
+
+var goodTrial%[MAXTRIALS%];		'Set aside array for good trials (1 if trial good, 0 if bad)
+
+''Mapping of seq vars to script vars
+
+'const seqHoldCnt%:=14;
+'const seqRewTm%:=16;
+'const seqRand%:=17;
+const seqEYE%:=11;
+const seqTASK%:=12;
+const seqSkipWt%:=14;
+const seqOKSLTON%:=15;
+const seqLZON%:=16;
+const seqOPTION%:=17;
+const seqSeqCnt%:=18;
+const seqITIA%:=20;
+const seqITIB%:=21;
+const seqnumtrl%:=22;
+const seqNumGood%:=23;
+const seqDlyst%:=26;
+const seqSKIPREW%:=29;
+const seqRewDly%:=31;
+const seqRewInc%:=33;
+const seqHLzvel%:=37;
+const seqFreq%:=38;
+const seqIndex%:=39;
+const seqChrvel%:=40;
+const seqGracePer%:=41;
+const seqHcross%:=43;
+const seqVcross%:=44;
+const seqHEScale%:=49;
+const seqHEOffset%:=50;
+const seqVEScale%:=51;
+const seqVEOffset%:=52;
+const seqTkWinSz%:=54;
+const seqFxWinSz%:=55;
+const seqVLzvel%:=61;
+'const seqRMODE%:=51;
+
+'Set toolbars
+
+if App(-1) < 506 then Message("This script requires Spike2 v5.06 or better.  Use bar_train5s instead."); halt; endif
+
+MainToolbar%();
+
+func MainToolbar%()
+ToolbarClear(); 'Remove all buttons
+ToolbarSet(-1, "Quit",Quit%);
+ToolbarSet(newfiletb%,"NEW FILE",NewFile%);
+ToolbarSet(starttb%,"&Start",Start%);
+ToolbarSet(resettb%,"Reset",Reset%);
+ToolbarSet(stoptb%,"NoUpdate",Stop%);
+ToolbarSet(writetb%,"NEURON",UnitWrite%);
+ToolbarSet(debugtb%,"debug",Debug%);
+ToolbarSet(calhtb%,"Cal HEye",CalHEye%);
+ToolbarSet(calvtb%,"Cal VEye",CalVEye%);
+ToolbarSet(fixatetb%,"&Fixation",Fixate%);
+ToolbarSet(seqsaccadetb%,"S&eq Sac",SeqSaccade%);
+ToolbarSet(saccadetb%,"Sacca&de",Saccade%);
+ToolbarSet(rpursuittb%,"Ra&mp Pursuit",RPursuit%);
+ToolbarSet(predicttb%,"Tg Intcpt",Predict%);
+ToolbarSet(spursuittb%,"Sine &Pursuit",SPursuit%);
+ToolbarSet(sOKStb%,"&OKS",SOKS%);
+ToolbarSet(scanceltb%,"VOR &Cancel",SCancel%);
+ToolbarSet(sVORtb%,"&VOR",SVOR%);
+ToolbarSet(advancetb%,"&Advance Trials",TrialAdvance%);
+ToolbarSet(hometb%,"Home motors",HomeMotors%);
+ToolbarSet(mtdisabletb%,"MtDIS",DisMotors%);
+ToolbarSet(mtenabletb%,"MtEN",EnMotors%);
+ToolbarSet(paramstb%,"E&ye Params",Params%);
+ToolbarSet(monitorstb%,"2 Monitors",Monitors2%);
+ToolbarSet(possnaketb%,"Long snake",ToggleEyeSnakeLen%);
+ToolbarSet(toggleeyeveltb%,"Show vel",ToggleEyeVel%);
+ToolbarSet(serialctrltb%,"Close Ser Port",SerClose%);
+'ToolbarSet(spikediscrimtb%," - ",OnlineSpikeDiscrimination%);  'Don't use this toolbar; instead call function when new file opened
+
+'if BUG% = 0 then	ToolbarEnable(debugtb%,0); endif
+if P1401% = 0 then ToolbarEnable(starttb%,0); ToolbarEnable(resettb%,0); ToolbarEnable(stoptb%,0); ToolbarEnable(hometb%,0); ToolbarEnable(mtenabletb%,0); ToolbarEnable(mtdisabletb%,0);endif
+
+ToolBar("Bar press training",ALLOWED%);
+
+end
+
+func SerOpen%()
+err%:=SerialOpen(KMGNSERIALPORT%,19200,8,0,2,2);
+'SerialOpen arguments:
+'	Port:			KMGNSERIALPORT
+'	Baud:			19200 bits/s
+'	Bits:			8
+'	Parity:		0	(no parity check)
+'	Stop bits:	2
+'	Handshake:	2 (XON/XOFF)
+
+
+if err% < 0 then
+    errStr$:=Error$(err%);
+    Message(errStr$);
+else 
+    serialOpen%:=1;
+    'Disable echo and prompt to speed up serial transmission
+    SerialWrite(KMGNSERIALPORT%,"\\*\r");		'Talk to both
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"ECHO 0\r");
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"PROMPT 0\r");
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"ACKMODE " + str$(ACKMODE%) + "\r");	'Should normally be zero
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"PROFMODE 1\r");	'For linear accelerations
+    yield(0.05);
+    'Set VLIM and VSCALE and internal units
+    SerialWrite(KMGNSERIALPORT%,"DIS\r");
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"UNITS 1\r");
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"ANOUT 8\r");   'Set position output
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"\\1\r");		'Talk to chair
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"VLIM " + str$(round(KMGNCHRVLIM)) + "\r");
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"VSCALE " + str$(round(KMGNCHRVSCALE)) + "\r");
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"\\2\r");		'Talk to drum
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"VLIM " + str$(round(KMGNDRMVLIM)) + "\r");
+    yield(0.05);
+    SerialWrite(KMGNSERIALPORT%,"VSCALE " + str$(round(KMGNDRMVSCALE)) + "\r");
+    yield(0.05);
+    
+endif
+return 1;
+end
+
+func SerClose%()
+
+'Re-enable echo and prompt so ServoStar can function properly
+SerialWrite(KMGNSERIALPORT%,"\\*\r");
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"ECHO 1\r");
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"PROMPT 1\r");
+yield(0.05);
+
+err%:=SerialClose(KMGNSERIALPORT%);
+
+if err% < 0 then
+    errStr$:=Error$(err%);
+    Message(errStr$);
+else serialOpen%:=0;
+endif
+
+return 1;
+end
+
+func EnMotors%() 'Enable both motors
+
+if not serialOpen% then
+    serOpen%();
+endif
+
+if not serialOpen% then Message("Klmgn Serial port couldn't be opened"); return 1; endif		'Check again; if still not open return neg error code
+
+SerialWrite(KMGNSERIALPORT%,"\\*\r");
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"EN\r");
+yield(0.05);
+
+return 1;
+end
+
+func DisMotors%() 'Disable both motors
+
+if not serialOpen% then
+    serOpen%();
+endif
+
+if not serialOpen% then Message("Klmgn Serial port couldn't be opened"); return 1; endif		'Check again; if still not open return neg error code
+
+SerialWrite(KMGNSERIALPORT%,"\\*\r");
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"DIS\r");
+yield(0.05);
+
+return 1;
+end
+
+func HomeMotors%()
+' \1 for Chair,  \2 for Drum or \* to talk to both
+
+'MIGHT BE GOOD IDEA TO IMPLEMENT FLAG TO DETERMINE WHETHER TASK IS RUNNING OR STOPPED
+
+var tmp%;
+
+'tmp%:=SampleSeqVar(seqMmode%);
+'if tmp%<>STOPPED% then
+'	Message("You must stop motors before they can be homed.");
+'	return 1;
+'endif
+
+if not serialOpen% then
+    serOpen%();
+endif
+
+if not serialOpen% then Message("Klmgn Serial port couldn't be opened"); return 1; endif		'Check again; if still not open return neg error code
+
+SerialWrite(KMGNSERIALPORT%,"\\*\r");
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"DIS\r");
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"OPMODE 8\r");  
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"PCMDMODE 0\r");  
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"\\1\r"); 
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"lmjr 400\r"); 'Was 380 prior to 11/1/2010
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"HCMODE 4\r"); 
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"lpfhz1 40\r"); 
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"lpfhz2 60\r"); 
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"tf 100\r"); 
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"bw 12\r"); 
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"MISPEED0 1\r");		'Home uses this speed
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"\\2\r"); 
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"tf 120\r"); 
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"bw 10\r"); 
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"MISPEED0 1\r");		'Home uses this speed
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"\\*\r"); 
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"EN\r");
+yield(0.05);
+SerialWrite(KMGNSERIALPORT%,"MH\r");
+yield(0.05);
+
+return 1;
+end
+
+func ReadAnimalValuesFromFile%()
+var txth%;
+
+txth%:=FileOpen(ConfigDir$+MONKNAME$+"_cfg.txt",8);
+
+if txth% <= 0 then
+    Message("No configuration file exists for %s. Using defaults.",MONKNAME$);
+    return 0;
+endif
+
+view(txth%);
+
+Read(); 'Skip first line because it contains strings describing format of file
+Read(HEyeScale,HEyeOffset,heyecrossgain,VEyeScale,VEyeOffset,veyecrossgain); 'Second line contains variables to read
+
+FileClose();
+
+return 1;
+end
+
+func WriteAnimalValuesToFile%()
+var txth%;
+
+'Structure of text file is
+
+txth%:=FileOpen(ConfigDir$+MONKNAME$+"_cfg.txt",8,1);
+
+if txth% <= 0 then
+    Message("Error opening file for writing monkey config (return code=%d).",txth%);
+    return 0;
+endif
+
+view(txth%);
+
+Print("HEyeScale,HEyeOffset,heyecrossgain,VEyeScale,VEyeOffset,veyecrossgain\n");
+Print("%3.2f,%3.2f,%3.2f,%3.2f,%3.2f,%3.2f",HEyeScale,HEyeOffset,heyecrossgain,VEyeScale,VEyeOffset,veyecrossgain);
+FileClose();
+
+return 1;
+end
+
+func OnlineSpikeDiscrimination%()
+var cursorlevel:=0;
+var threshmode%:=7;
+var junk%;
+
+view(vh%);
+
+'check for Hcursor on unit channel
+if Hcursnum% = 0 then
+    Hcursnum%:=HCursorNew(UNITCHAN%,3);
+    if Hcursnum% = 0 then           'If all cursors are in use, use #4
+        HCursor(4,3,UNITCHAN%);
+    endif
+endif
+
+cursorlevel:=HCursor(Hcursnum%);
+
+if cursorlevel >= 0 then
+    threshmode%:=7;
+else
+    threshmode%:=8;
+endif
+
+'Check to see if memory channel is already setup for events and has process attached
+'Note the second part of this conditional (else) doesn't work exactly as it should, but given the way this function is called right now
+'this shouldn't matter--i.e., the else part will never be run
+if spikememchan% = 0 then
+    'channel doesn't exist
+    'set up new channel and add threshold process
+'    CursorActive(0,threshmode%,UNITCHAN%,0.0005,"","","HCursor(Hcursnum%)");
+    junk%:=MeasureX(102,UNITCHAN%,"Cursor(0)");
+    if junk%=0 then
+        spikememchan%:=MeasureToChan(0,"Spikes",2,threshmode%,UNITCHAN%,0.0005,"HCursor("+Str$(Hcursnum%)+")");
+        SpkDiscrimMemChansUsed%:=SpkDiscrimMemChansUsed%+1;
+    endif
+else
+    SpkDiscrimMemChans%[SpkDiscrimMemChansUsed%-1]:=spikememchan%;
+    spikememchan%:=MeasureToChan(0,"Spikes",2,threshmode%,UNITCHAN%,0.0005,"HCursor("+Str$(Hcursnum%)+")");
+endif
+
+DrawMode(spikememchan%,7,2);
+ProcessAuto(1,0,0,0,0.001,spikememchan%);
+    
+'Update peak find based on difference between horizontal cursor on unit chan (there must only be one) and zero
+'If H cursor less than zero, use trough find
+    return 1;
+end
+
+func ToggleEyeSnakeLen%()
+
+if EyePosDataLen%=10 then
+    EyePosDataLen%:=80;
+    view(XYh%).XYSize(1,-EyePosDataLen%);
+    ToolbarSet(possnaketb%,"Short snake",ToggleEyeSnakeLen%);
+else
+    EyePosDataLen%:=10;
+    view(XYh%).XYSize(1,-EyePosDataLen%);
+    ToolbarSet(possnaketb%,"Long snake",ToggleEyeSnakeLen%);
+endif
+
+return 1;
+end
+
+func ToggleEyeVel%()
+
+if Heyevelchan% > 0 then        'Duplicate channels already exist, so just show or hide them
+    if ChanVisible(Heyevelchan%) then
+        ChanHide(Heyevelchan%);
+        ChanHide(Veyevelchan%);
+        ToolbarSet(toggleeyeveltb%,"Show vel",ToggleEyeVel%);
+    else
+        ChanShow(Heyevelchan%);
+        ChanShow(Veyevelchan%);
+        ToolbarSet(toggleeyeveltb%,"Hide vel",ToggleEyeVel%);
+    endif
+else    'Need to create duplicate channels and apply slope process
+    Heyevelchan%:=ChanDuplicate(Hcompeyeposchan%);
+    Veyevelchan%:=ChanDuplicate(Vcompeyeposchan%);
+    
+    ChanProcessAdd(Heyevelchan%,3,0.04);
+    ChanProcessAdd(Veyevelchan%,3,0.04);
+    
+    ChanShow(Heyevelchan%);
+    ChanShow(Veyevelchan%);
+    
+    view(vh%).YRange(Heyevelchan%,-30,30);
+    view(vh%).YRange(Veyevelchan%,-30,30);
+    
+    ToolbarSet(toggleeyeveltb%,"Hide vel",ToggleEyeVel%);
+endif
+
+return 1;
+end
+
+func CalHEye%()
+var v1,v2,v1other,v2other,tkwinbits%,fxwinbits%;			'Values of laser at t1 and t2	
+var eye1,eye2,eye1other,eye2other;
+var deltaeye,deltaeyeother;
+var both%,ok%;
+var modestring$;
+
+DlgCreate("H Eye Calibration");
+'DlgText("What kind of calibration would you like to do? \"Full calibration\" includes crosstalk calculation so you should only do it with pure horizontal or vertical eye movements.",0,1);
+DlgText("What kind of calibration would you like to do?",0,1);
+
+DlgAllow(ALLOWED%,IdleProc%);
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"Just offset");
+DlgButton(2,"Scale and offset");
+'DlgButton(3,"Full calibration");
+both%:=DlgShow();
+
+if (Cursor(1) < 0 or Cursor(2) < 0 and (both%=2 or both%=3)) then
+    Message("You need to place Cursors 1 and 2 in the time view to calibrate eye");
+    return 1;
+endif
+
+if Cursor(1) < 0 then
+    Message("You need to place Cursor 1 in the time view to calibrate eye");
+    return 1;
+endif
+
+v1:=ChanValue(HLZCHAN%,Cursor(1));
+v2:=ChanValue(HLZCHAN%,Cursor(2));
+v1other:=ChanValue(VLZCHAN%,Cursor(1));
+v2other:=ChanValue(VLZCHAN%,Cursor(2));
+
+eye1:=ChanValue(HEYECHAN%,Cursor(1));
+eye2:=ChanValue(HEYECHAN%,Cursor(2));
+eye1other:=ChanValue(VEYECHAN%,Cursor(1));
+eye2other:=ChanValue(VEYECHAN%,Cursor(2));
+
+docase
+case both%=0 then
+    return 1;
+case both%=1 then   'Do offset
+    HEyeOffset:=v1-(HEyeScale*(eye1-eye1other*heyecrossgain));
+case both%=2 then   'Scale and offset
+    if abs(v1-v2) < 2 then
+        ok%:=Query("There is less than a 2 degree difference between your two calibration points.\nAre you sure you want to use these points?");
+    if not ok% then return 1; endif
+    endif
+    HEyeScale:=(v2-v1)/((eye2-eye2other*heyecrossgain)-(eye1-eye1other*heyecrossgain));
+    HEyeOffset:=v1-(HEyeScale*(eye1-eye1other*heyecrossgain));
+case both%=3 then
+    'Calculate scale and offset after calculating crosstalk
+    'First make simple test to ensure user 
+    if abs(v2-v1) < 0.5*abs(v2other-v1other) then
+    ok%:=Query("The vertical laser changed significantly compared to the horizontal, meaning you probably pressed the wrong calibration button or have the cursors improperly positioned. Are you sure you want to continue?");
+    if not ok% then
+        return 1;
+    endif           
+    heyecrossgain:=(eye2other-eye1other)/(eye2-eye1);
+    HEyeScale:=(v2-v1)/((eye2-eye2other*heyecrossgain)-(eye1-eye1other*heyecrossgain));
+    HEyeOffset:=v1-(HEyeScale*(eye1-eye1other*heyecrossgain));
+endif
+endcase
+
+HEyeScaleConversion:=128*(HEyeScale/HLzScale);		'Ratio of eye scale to laser scale, shifted 7 bits to avoid roundoff errors
+HEyeOffsetConversion:=(6553.6/HLzScale)*HEyeOffset;			'We assume laser offset is zero so we don't need to take it into account here.
+
+'I'm not sure why I included these two lines. Is it necessary to recalculate windows if laser scale doesn't change?
+tkwinbits%:=6553.6*(tkwinsz/HLzScale);									'H and V window calibration is same --> assumes H and V laser scale are equal.
+fxwinbits%:=6553.6*(fxwinsz/HLzScale);									'H and V window calibration is same --> assumes H and V laser scale are equal.
+
+VirtualChan(Hcompeyeposchan%,Str$(HEyeScale)+"*(Ch("+Str$(HEYECHAN%)+")-"+Str$(heyecrossgain)+"*"+"Ch("+Str$(VEYECHAN%)+"))"+"+"+Str$(HEyeOffset),HEYECHAN%);
+
+view(vh%).YRange(HEYECHAN%,view(vh%).YLow(HLZCHAN%),view(vh%).YHigh(HLZCHAN%));
+view(vh%).YRange(Hcompeyeposchan%,view(vh%).YLow(HLZCHAN%),view(vh%).YHigh(HLZCHAN%));
+
+modestring$:=Print$(", Mode %d",both%);
+
+SampleText(Print$("Calibration point 1 (t=%5.2f)%s",Cursor(1),modestring$),Cursor(1));
+if both%>1 then
+    SampleText(Print$("Calibration point 2 (t=%5.2f)%s",Cursor(2),modestring$),Cursor(2));
+endif
+
+'Pass updated calibration to sequencer
+SampleSeqVar(seqHEScale%,HEyeScaleConversion);
+SampleSeqVar(seqHEOffset%,HEyeOffsetConversion);
+SampleSeqVar(seqTkWinSz%,tkwinbits%);
+SampleSeqVar(seqFxWinSz%,fxwinbits%);
+
+return 1;
+end
+
+func CalVEye%()
+var v1,v2,v1other,v2other,tkwinbits%,fxwinbits%;			'Values of laser at t1 and t2	
+var eye1,eye2,eye1other,eye2other;
+var deltaeye,deltaeyeother;
+var both%,ok%;
+var modestring$;
+
+DlgCreate("V Eye Calibration");
+'DlgText("What kind of calibration would you like to do? \"Full calibration\" includes crosstalk calculation so you should only do it with pure horizontal or vertical eye movements.",0,1);
+DlgText("What kind of calibration would you like to do?",0,1);
+
+DlgAllow(ALLOWED%,IdleProc%);
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"Just offset");
+DlgButton(2,"Scale and offset");
+'DlgButton(3,"Full calibration");
+both%:=DlgShow();
+
+if (Cursor(1) < 0 or Cursor(2) < 0 and (both%=2 or both%=3)) then
+    Message("You need to place Cursors 1 and 2 in the time view to calibrate eye");
+    return 1;
+endif
+
+if Cursor(1) < 0 then
+    Message("You need to place Cursor 1 in the time view to calibrate eye");
+    return 1;
+endif
+
+v1:=ChanValue(VLZCHAN%,Cursor(1));
+v2:=ChanValue(VLZCHAN%,Cursor(2));
+v1other:=ChanValue(HLZCHAN%,Cursor(1));
+v2other:=ChanValue(HLZCHAN%,Cursor(2));
+
+eye1:=ChanValue(VEYECHAN%,Cursor(1));
+eye2:=ChanValue(VEYECHAN%,Cursor(2));
+eye1other:=ChanValue(HEYECHAN%,Cursor(1));
+eye2other:=ChanValue(HEYECHAN%,Cursor(2));
+
+docase
+case both%=0 then
+    return 1;
+case both%=1 then   'Do offset
+    VEyeOffset:=v1-(VEyeScale*(eye1-eye1other*veyecrossgain));
+case both%=2 then   'Scale and offset
+    if abs(v1-v2) < 2 then
+        ok%:=Query("There is less than a 2 degree difference between your two calibration points.\nAre you sure you want to use these points?");
+    if not ok% then return 1; endif
+    endif
+    VEyeScale:=(v2-v1)/((eye2-eye2other*veyecrossgain)-(eye1-eye1other*veyecrossgain));
+    VEyeOffset:=v1-(VEyeScale*(eye1-eye1other*veyecrossgain));
+case both%=3 then
+    'Calculate scale and offset after calculating crosstalk
+    'First make simple test to ensure user 
+    if abs(v2-v1) < 0.5*abs(v2other-v1other) then
+    ok%:=Query("The vertical laser changed significantly compared to the horizontal, meaning you probably pressed the wrong calibration button or have the cursors improperly positioned. Are you sure you want to continue?");
+    if not ok% then
+        return 1;
+    endif                 
+    veyecrossgain:=(eye2other-eye1other)/(eye2-eye1);
+    VEyeScale:=(v2-v1)/((eye2-eye2other*veyecrossgain)-(eye1-eye1other*veyecrossgain));
+    VEyeOffset:=v1-(VEyeScale*(eye1-eye1other*veyecrossgain));
+endif
+endcase
+
+VEyeScaleConversion:=128*(VEyeScale/VLzScale);		'Ratio of eye scale to laser scale, shifted 7 bits to avoid roundoff errors
+VEyeOffsetConversion:=(6553.6/VLzScale)*VEyeOffset;			'We assume laser offset is zero so we don't need to take it into account here.
+
+'I'm not sure why I included these two lines. Is it necessary to recalculate windows if laser scale doesn't change?
+tkwinbits%:=6553.6*(tkwinsz/VLzScale);									'H and V window calibration is same --> assumes H and V laser scale are equal.
+fxwinbits%:=6553.6*(fxwinsz/VLzScale);									'H and V window calibration is same --> assumes H and V laser scale are equal.
+
+VirtualChan(Vcompeyeposchan%,Str$(VEyeScale)+"*(Ch("+Str$(VEYECHAN%)+")-"+Str$(veyecrossgain)+"*"+"Ch("+Str$(HEYECHAN%)+"))"+"+"+Str$(VEyeOffset),HEYECHAN%);
+
+view(vh%).YRange(VEYECHAN%,view(vh%).YLow(VLZCHAN%),view(vh%).YHigh(VLZCHAN%));
+view(vh%).YRange(Vcompeyeposchan%,view(vh%).YLow(VLZCHAN%),view(vh%).YHigh(VLZCHAN%));
+
+modestring$:=Print$(", Mode %d",both%);
+
+SampleText(Print$("Calibration point 1 (t=%5.2f)%s",Cursor(1),modestring$),Cursor(1));
+if both%>1 then
+    SampleText(Print$("Calibration point 2 (t=%5.2f)%s",Cursor(2),modestring$),Cursor(2));
+endif
+
+'Pass updated calibration to sequencer
+SampleSeqVar(seqVEScale%,VEyeScaleConversion);
+SampleSeqVar(seqVEOffset%,VEyeOffsetConversion);
+SampleSeqVar(seqTkWinSz%,tkwinbits%);
+SampleSeqVar(seqFxWinSz%,fxwinbits%);
+
+return 1;
+end
+
+
+func Start%()
+
+SampleKey("G");
+ToolbarSet(0,"",IdleProc%);
+SampleText(tTask$);
+ToolbarSet(starttb%,"Pau&se",Pause%);
+
+'Reset task specific counters
+numtrloffset:=numtrl;
+numgoodoffset:=numgood;
+
+if tTask$ <> oldtTask$ then
+    PrintLog("Running %s task\n",tTask$);
+endif
+
+return 1;
+
+end
+
+func Pause%()
+'Stop task but allow IdleProc processing (Stop%() will stop IdleProc too).  
+
+SampleKey("X");
+ToolbarSet(starttb%,"&Start",Start%);
+
+return 1;
+
+end
+
+func TrialAdvance%()
+var n%:=1;
+var old%,ok%,new%;
+
+DlgCreate("Advance Trials");  
+DlgInteger(1,"How many trials to advance",1,TABLELENGTH%-1);
+DlgAllow(ALLOWED%,IdleProc%);
+ok%:=DlgShow(n%);
+
+if ok% then
+    Pause%();
+    old%:=SampleSeqVar(seqIndex%);
+    new%:=old%+n%;
+    if new%>TABLELENGTH%-1 then
+        new%:=TABLELENGTH%-1;
+    endif
+    SampleSeqVar(seqIndex%,new%);
+    Start%();
+endif
+
+return 1;
+
+end
+
+func UnitWrite%()
+var sw%;
+if SampleStatus()>=0 then 
+    sw%:=SampleWrite(-1,UNITCHAN%); ' check current status
+    if sw%>0 then
+        SampleWrite(0,UNITCHAN%);
+        ToolbarSet(writetb%,"NEURON",Unitwrite%);
+    else
+        SampleWrite(1,UNITCHAN%);
+        ToolbarSet(writetb%,"NONEURON",Unitwrite%);
+    endif
+else
+    ToolbarSet(writetb%, "NOT sampling",Unitwrite%);
+endif
+return 1
+end
+
+func Debug%()
+'Debug sequencer
+if BUG%=0 then
+    BUG%:=1;
+    ToolbarSet(debugtb%,"DEBUG",Debug%);
+else
+    BUG%:=0;
+    ToolbarSet(debugtb%,"debug",Debug%);
+endif  
+
+return 1;
+end
+
+func Reset%()
+'Reset statistics
+
+Pause%();
+
+SampleSeqVar(seqNumTrl%,0);				'Zero trials completed
+SampleSeqVar(seqNumGood%,0);				'Zero good trials
+SampleSeqVar(seqIndex%,0);          'Zero task table index in sequencer
+
+numtrl:=0;
+numgood:=0;
+sweep1%:=1;					'Value of current sweep for raster 1
+sweep2%:=1;					'Value of current sweep for raster 2
+ArrConst(goodTrial%[],0);	'Reset all elements of array to zero
+
+'view(r1h%).XYDelete(1);
+'view(r1h%).XYDelete(2);
+'view(r2h%).XYDelete(1);
+'view(r2h%).XYDelete(2);
+'view(errvh%).XYDelete(1);
+
+if serialOpen% then
+	SerClose%();
+endif
+
+ClearLog%();
+
+Start%();
+
+return 1;
+end
+
+func Monitors1%()
+'view(vh%).Window(0,0,70,50);
+'view(lh%).Window(0,50,70,70);
+'view(r1h%).WindowVisible(0);
+'view(r2h%).Window(70,50,100,100);
+'view(XYh%).Window(70,0,100,50);
+'view(errvh%).Window(0,70,70,100);
+'view(errvh%).XYDrawMode(1,1,7);		'Draw points as horizontal lines
+'view(errvh%).XYDelete(1);				'Clear view so points plot correctly when switching axis orientation
+view(XYh%).Window(75,0,100,50);
+view(lh%).Window(75,50,100,100);
+view(vh%).Window(0,0,75,100);
+'
+NUMMONITORS%:=1;
+
+ToolbarSet(monitorstb%,"2 Monitors",Monitors2%);
+return 1;
+end
+
+func Monitors2%()
+'	view(vh%).Window(0,0,50,100);
+'	view(r1h%).Window(50,0,75,50);
+'	view(r1h%).WindowVisible(1);
+'	view(r2h%).Window(75,0,100,50);
+'	view(lh%).Window(65,50,100,75);
+'	view(XYh%).Window(50,50,65,100);
+'	view(errvh%).Window(65,75,100,100);
+
+'view(vh%).Window(0,0,50,100);
+'view(r1h%).Window(80,0,100,50);
+'view(r1h%).WindowVisible(1);
+'view(r2h%).Window(68,0,80,100);
+'view(lh%).Window(50,60,68,100);
+'view(XYh%).Window(50,0,68,60);
+'view(errvh%).Window(80,50,100,100);
+'	view(errvh%).XYDrawMode(1,1,8);		'Draw points as vertical lines
+'	view(errvh%).XYDelete(1);				'Clear view so points plot correctly when switching axis orientation
+view(XYh%).Window(75,0,100,50);
+view(lh%).Window(75,50,100,100);
+view(vh%).Window(0,0,75,100);
+
+NUMMONITORS%:=2;
+
+ToolbarSet(monitorstb%,"1 Monitor",Monitors1%);
+return 1;
+end
+
+func Stop%()
+'Stop task in sequencer and stop IdleProc
+ToolbarSet(0,"");			
+ToolbarSet(stoptb%,"Update",Update%);
+return 1;
+end
+
+func Update%()
+'Stop task in sequencer and stop IdleProc
+ToolbarSet(0,"",IdleProc%);			
+ToolbarSet(stoptb%,"NoUpdate",Stop%);
+return 1;
+end
+
+func Fixate%()
+var ok%;
+var i%:=1;
+var j%:=1;
+var k%,m%;
+
+var mark%:=33;       'Base mark "!" (k is added to it to give all directions)
+
+var holdtmst%;		'Hold time in sequencer steps (counter)
+var ITIst%;			'ITI in sequencer steps
+var ITIBst%;		'2nd ITI in sequencer steps
+var rewdlyst%;		'Reward delay time in sequencer steps
+var rewtmst%;		'Reward time in sequencer steps
+var fixtmst%:=1;	'Fix time in sequencer steps--one for fixation (because decremented in sequencer)
+
+var tmprandholdtm%[TABLELENGTH%];    'For generating random holdtime to add to base holdtime array
+var randholdtmst%[TABLELENGTH%];		'...in sequencer steps (counter)
+
+var lzposdegs, Hlzposbits%, Vlzposbits%;
+var sH%,eH%,sV%,eV%;
+var tkwinbits%,fxwinbits%;
+
+var numpositions%,n%,r%;
+'Arrays used to load paramtable%
+var tmp[TABLELENGTH%];		            'array used for random permutation
+var startH%[TABLELENGTH%];				'starting position of horizontal laser
+var endH%[TABLELENGTH%];				'ending position of horizontal laser
+var startV%[TABLELENGTH%];				'starting position of vertical laser
+var endV%[TABLELENGTH%];				'ending position of vertical laser
+var holdtimes%[TABLELENGTH%];			'fixed or randomized
+var rewardtimes%[TABLELENGTH%];		'fixed or biased
+var markers%[TABLELENGTH%];         'In decimal
+
+'Arrays to determine laser direction
+var Hdirs%[9],Vdirs%[9];
+
+Hdirs%[0]:=-1;
+Hdirs%[1]:=0;
+Hdirs%[2]:=1;
+Hdirs%[3]:=-1;
+Hdirs%[4]:=0;
+Hdirs%[5]:=1;
+Hdirs%[6]:=-1;
+Hdirs%[7]:=0;
+Hdirs%[8]:=1;
+
+Vdirs%[0]:=1;
+Vdirs%[1]:=1;
+Vdirs%[2]:=1;
+Vdirs%[3]:=0;
+Vdirs%[4]:=0;
+Vdirs%[5]:=0;
+Vdirs%[6]:=-1;
+Vdirs%[7]:=-1;
+Vdirs%[8]:=-1;
+
+DlgCreate("Fixation Parameters (RUN will run fixation)",0,0,70,18);
+DlgInteger(i%,"ITI and Bad Timeout (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",1,100000,48,j%); i%+=1;j%+=1;
+DlgInteger(i%,"&Hold time Base and Random (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",0,50000,48,j%); i%+=1;j%+=2;
+DlgInteger(i%,"&Reward Time and Delay (ms)",1,10000,33,j%); i%+=1;
+DlgInteger(i%,"",1,10000,48,j%); i%+=1;j%+=2;
+DlgReal(i%,"Target distance from center",0.0,30.0,40,j%); i%+=1;j%+=1;
+DlgReal(i%,"Window size for fixation",0.1,100.0,40,j%); i%+=1;j%+=2;
+DlgList(i%,"Trial ordering","Block|Random",2,15,j%); i%+=1;j%+=2;
+DlgText("Positions to use",30,j%);j%+=1;
+fCheckItemStart%:=i%;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1;j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1;j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+fCheckItemEnd%:=i%;
+DlgCheck(i%,"",40,j%); i%+=1;j%+=1;
+fCheckItemToggle%:=i%;
+DlgCheck(i%,"Toggle Positions",28,j%);
+
+DlgAllow(ALLOWED%,IdleProc%,fTogglePos%);
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"RUN|0x0d");
+DlgButton(2,"Save|0x20");
+ok%:=DlgShow(fITI%,fITIB%,fholdtm%,frandholdtm%,frewtm%,rewdly%,fLzPos,fTkwinsz,fRAND%,fdirs%[],fCheckToggle%);
+
+if ok%=1 then  'If user selects OK
+    
+    if frewtm% >= 1000 then
+        Message("Reward size of " + Str$(frewtm%) + " is rather large.  Make sure you didn't accidently type an extra zero.\n" + 
+        "                              NOTE: You'll need to correct the value yourself.");
+    endif
+        
+    'First figure out how many different positions we need to put in table
+    numpositions%:=ArrSum(fdirs%[]);
+    if numpositions% = 0 then Message("You must choose at least one position.\nTask not started!"); return 1; endif
+    n%:=Trunc(TABLELENGTH%/numpositions%);      'Get whole number of times to repeat positions
+    r%:=TABLELENGTH% mod numpositions%;         'Get remaining spaces left in array
+    
+    lzposdegs:=fLzPos;
+    Hlzposbits%:=Round(lzposdegs*BitsPerHLzDeg);
+    Vlzposbits%:=Round(lzposdegs*BitsPerVLzDeg);
+    
+    sH%:=Hlzposbits%;
+    eH%:=Hlzposbits%;
+    sV%:=Vlzposbits%;
+    eV%:=Vlzposbits%;
+    
+    if EYE%=1 then   'If continuous mode, switch to trial mode, since continuous is meaningless in this mode
+        EYE%:=0;
+    endif
+    
+    rewdlyst%:=rewdly%/SeqStepMS;					'Convert time in ms to sequencer steps
+    rewtmst%:=frewtm%/SeqStepMS;					'Convert time in ms to sequencer steps    
+    holdtmst%:=fholdtm%/SeqStepMS/StepsPerEIWLoop;			'Divide by 25 because 25 steps occupy one loop
+    
+    ITIst%:=fITI%/SeqStepMS;							'Convert time in ms to sequencer steps
+    ITIBst%:=fITIB%/SeqStepMS;							'Convert time in ms to sequencer steps
+    
+    tkwinsz:=fTkwinsz;                      'Set globally
+    fxwinsz:=fTkwinsz;             'Fix winsz same as task winsz for fixation
+    tkwinbits%:=6553.6*(tkwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    fxwinbits%:=6553.6*(fxwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    
+    Rand(tmprandholdtm%[],frandholdtm%);
+    ArrConst(randholdtmst%[],tmprandholdtm%[]);
+    ArrDiv(randholdtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randholdtmst%[],StepsPerEIWLoop);
+    
+    'Now loop through for each position and assign values to table
+    m%:=0;
+    for k%:=0 to Len(fdirs%[])-1 do
+        if fdirs%[k%] = 1 then
+            fillarray%(startH%[],Hdirs%[k%]*sH%,m%*n%,m%*n%+n%-1);
+            fillarray%(endH%[],Hdirs%[k%]*eH%,m%*n%,m%*n%+n%-1);
+            fillarray%(startV%[],Vdirs%[k%]*sV%,m%*n%,m%*n%+n%-1);
+            fillarray%(endV%[],Vdirs%[k%]*eV%,m%*n%,m%*n%+n%-1);
+            fillarray%(holdtimes%[],holdtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(rewardtimes%[],rewtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(markers%[],mark%+k%,m%*n%,m%*n%+n%-1);
+            
+            m%+=1;       'Advance counter to fill next group of values            
+        endif
+    next
+    
+    'Fill in remaining spaces of array (just use last r% values, since r% will be pretty small)
+    if r%>0 then
+        for k%:=1 to r% do    
+            startH%[TABLELENGTH%-k%]:=startH%[TABLELENGTH%-r%-k%];
+            endH%[TABLELENGTH%-k%]:=endH%[TABLELENGTH%-r%-k%];
+            startV%[TABLELENGTH%-k%]:=startV%[TABLELENGTH%-r%-k%];
+            endV%[TABLELENGTH%-k%]:=endV%[TABLELENGTH%-r%-k%];
+            holdtimes%[TABLELENGTH%-k%]:=holdtimes%[TABLELENGTH%-r%-k%];
+            rewardtimes%[TABLELENGTH%-k%]:=rewardtimes%[TABLELENGTH%-r%-k%];
+            markers%[TABLELENGTH%-k%]:=markers%[TABLELENGTH%-r%-k%];
+        next
+    endif
+    
+    'Add random times to base hold times
+    ArrAdd(holdtimes%[],randholdtmst%[]);
+    
+    if fRAND% = 1 then
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[]);
+        'Do it again
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[]);
+    endif
+    
+    if REWRAND% = 1 then
+        Rand(rewardtimes%[],rewtmst%-(25/SeqStepMS),25/SeqStepMS);     'Generate random array between 25 msec and rewtm msec
+    endif
+        
+    'Generate Paramtable
+    ArrConst(ParamTable%[0*TABLELENGTH%:TABLELENGTH%],startH%[]);
+    ArrConst(ParamTable%[1*TABLELENGTH%:TABLELENGTH%],endH%[]);
+    ArrConst(ParamTable%[2*TABLELENGTH%:TABLELENGTH%],startV%[]);
+    ArrConst(ParamTable%[3*TABLELENGTH%:TABLELENGTH%],endV%[]);
+    ArrConst(ParamTable%[4*TABLELENGTH%:TABLELENGTH%],holdtimes%[]);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    ArrConst(ParamTable%[6*TABLELENGTH%:TABLELENGTH%],markers%[]);
+	ArrConst(ParamTable%[7*TABLELENGTH%:TABLELENGTH%],fixtmst%);    'Use scalar, since we don't need to randomize fix time
+    
+    'This code overrides the instructions above that fill reward times into ParamTable
+'    if smrew% <> frewtm% then
+        smrew%:=frewtm%;
+        MakeRandRewArray%(rewardtimes%[],smrew%/SeqStepMS,bgrew%/SeqStepMS,bgrewpcnt%);
+        ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+'    endif
+    
+    if BUG% then
+        ClearLog%();
+        for i%:=0 to len(ParamTable%[])-1 do
+            PrintLog("ParamTable %d: %d\n",i%,ParamTable%[i%]);
+        next
+        
+        yield();
+    endif
+    
+    TASK%:=1;
+    oldtTask$:=tTask$;
+    tTask$:="Fixate, "+"Pos="+Str$(fLzPos);
+    
+    if P1401% then          'If we are sampling
+        Pause%();       'pause task to pass variables to sequencer
+        
+        'Pass everything to sequencer
+        SampleSeqVar(seqRewDly%,rewdlyst%);
+        SampleSeqVar(seqITIA%,ITIst%);					'set ITI variable in sequencer
+        SampleSeqVar(seqITIB%,ITIBst%);					'set 2nd ITI variable in sequencer
+        SampleSeqVar(seqTASK%,TASK%);			'1=Fixate
+        SampleSeqVar(seqEYE%,EYE%);         'if eye mode updated by dialog, need to send to sequencer
+        SampleSeqVar(seqTkWinSz%,tkwinbits%);
+        SampleSeqVar(seqFxWinSz%,fxwinbits%);
+        SampleSeqVar(seqLZON%,1);
+        
+        SampleSeqVar(seqIndex%,0);          'Reset table index
+        SampleSeqTable(ParamTable%[]);
+        
+        yield(.1);		'Wait 100 ms to make sure variables received
+        Start%();       'Now start it back up
+    endif
+    
+    
+endif  
+
+return 1;
+end
+
+func fillarray%(a%[],val%,st%,en%)     'Fill array a%[] with val%, starting at st% and ending at en% element (zero referenced)
+var i%;
+
+'A little error checking
+if st% < 0 or en% < 0 or en% < st% then return -1; endif
+if en% > Len(a%[])-1 then return -2; endif
+
+for i%:=st% to en% do
+    a%[i%]:=val%;
+next
+
+return 1;
+
+end
+
+func swap%(&a%,&b%)     'Swap integers a and b 
+var tmp%;
+
+tmp%:=a%;
+a%:=b%;
+b%:=tmp%;
+
+return 1;
+end
+
+func Arrswap(&a%[],&b%[])     'Swap arrays a and b 
+var tmp%[len(a%[])];
+
+Arrconst(tmp%[],a%[]);
+Arrconst(a%[],b%[]);
+Arrconst(b%[],tmp%[]);
+
+return 1;
+end
+
+
+func swap(&a,&b)     'Swap reals a and b 
+var tmp;
+
+tmp:=a;
+a:=b;
+b:=tmp;
+
+return 1;
+end
+
+func randperm%(ar%[],n%)    'Fill ar%[] with random permutation of integers from 0 to n%-1
+var tmp[n%],i%;
+
+for i%:=0 to len(ar%[])-1 do ar%[i%]:=i%; next
+
+Rand(tmp[]);
+ArrSort(tmp[],0,ar%[]);
+
+return 1;
+end
+
+func SeqSaccade%()
+
+var ok%;
+var i%:=1;
+var j%:=1;
+var k%,m%;
+var tmp;
+var swapchk%:=0;        'Only used to swap start/end positions in dialog callback
+
+var mark%:=79;       'Base mark "O" ()
+
+var holdtmst%;		'Hold time in sequencer steps (counter)
+var ITIst%;			'ITI in sequencer steps
+var ITIBst%;		'2nd ITI in sequencer steps
+var rewdlyst%;		'Reward delay time in sequencer steps
+var rewtmst%;		'Reward time in sequencer steps
+var fixtmst%;	'Fix time in sequencer steps--one for fixation (because decremented in sequencer)
+var sacdlyst%;
+
+var tmprandholdtm%[TABLELENGTH%];    'For generating random holdtime to add to base holdtime array
+var randholdtmst%[TABLELENGTH%];		'...in sequencer steps (counter)
+
+var lzstartdegs, lzstartbits%;
+var lzstepdegs, lzstepbits%;
+var lzenddegs, lzendbits%;
+var lzHoffdegs, lzHoffbits%, lzVoffdegs, lzVoffbits%;
+
+var tkwinbits%,fxwinbits%;
+
+var numpositions%,n%,r%;
+'Arrays used to load paramtable%
+'var tmp[TABLELENGTH%];		            'array used for random permutation
+'The following 4 arrays are used to hold fixed-point numbers for start and end positions
+var sH[TABLELENGTH%];				'starting position of horizontal laser
+var eH[TABLELENGTH%];				'ending position of horizontal laser
+var sV[TABLELENGTH%];				'starting position of vertical laser
+var eV[TABLELENGTH%];				'ending position of vertical laser
+'The next 4 arrays will hold the bit equivalents of the above 4 arrays
+var startH%[TABLELENGTH%];				'starting position of horizontal laser
+var endH%[TABLELENGTH%];				'ending position of horizontal laser
+var startV%[TABLELENGTH%];				'starting position of vertical laser
+var endV%[TABLELENGTH%];				'ending position of vertical laser
+
+var holdtimes%[TABLELENGTH%];			'fixed or randomized
+var rewardtimes%[TABLELENGTH%];		'fixed or biased
+var markers%[TABLELENGTH%];         'In decimal
+var fixtimes%[TABLELENGTH%]; 
+
+DlgCreate("Sequential Saccade Parameters (RUN will run saccade task)",0,0,88,18);
+DlgInteger(i%,"ITI and Bad Timeout (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",1,100000,48,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Fix time before saccade (ms)",1,100000,33,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Hold time (ms)",1,100000,33,j%); i%+=1; j%+=2;
+DlgInteger(i%,"&Reward Time and Delay (ms)",1,10000,33,j%); i%+=1;
+DlgInteger(i%,"",1,10000,48,j%); i%+=1; j%+=1;
+DlgCheck(i%,"No reward on each step",33,j%); i%+=1; j%+=2;
+DlgCheck(i%,"Use simple mode",50,j%); i%+=1;j%+=1;
+DlgReal(i%,"Target start position, step size, end position (deg)",-30.0,30.0,44,j%); i%+=1;
+DlgReal(i%,"",0.1,60.0,58,j%,"0.5|1.0|2.0|3.0|4.0|5.0|8.0|10.0|12.0"); i%+=1;
+DlgReal(i%,"",-30.0,30.0,74,j%); i%+=1; j%+=1;
+DlgCheck(i%,"Swap start and end points",50,j%); i%+=1;j%+=1;
+DlgReal(i%,"Target Horiz and Vert &offset",-30.0,30.0,33,j%); i%+=1;
+DlgReal(i%,"",-30.0,30.0,48,j%); i%+=1; j%+=1;
+DlgReal(i%,"Initial window size for fixation",0.1,100.0,58,j%); i%+=1; j%+=1;
+DlgReal(i%,"&Window size for saccades",0.1,100.0,58,j%); i%+=1; j%+=1;
+DlgInteger(i%,"Delay before EIW check (ms)",1,10000,58,j%); i%+=1; j%+=2;
+DlgList(i%,"Saccade type","Horizontal|Vertical",2,15,j%); i%+=1; j%+=2;
+
+DlgAllow(ALLOWED%,IdleProc%,SwitchSeqDirection%);
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"RUN|0x0d");
+DlgButton(2,"Save|0x20");
+ok%:=DlgShow(sqITI%,sqITIB%,sqfixtm%,sqholdtm%,sqrewtm%,rewdly%,SKIPREWARD%,sqSIMPLE%,sqLzStart,sqLzStep,sqLzEnd,swapchk%,sqLzHOffset,sqLzVOffset,sqFxwinsz,sqTkwinsz,sqdelayeiw%,sqMODE%);
+
+if ok%=1 then  'If user selects OK
+    
+    if sqrewtm% >= 1000 then
+        Message("Reward size of " + Str$(sqrewtm%) + " is rather large.  Make sure you didn't accidently type an extra zero.\n" + 
+        "                              NOTE: You'll need to correct the value yourself.");
+    endif
+    
+    if sqSIMPLE%=1 then
+        sqLzStep:=abs(sqLzEnd-sqLzStart);       'Make single step from start to end position
+    endif
+        
+    'First figure out how many different positions we need to put in table
+    tmp:=sqLzEnd-sqLzStart;
+    numpositions%:=Trunc(Abs(tmp/sqLzStep));  'Add 1 to include starting position as position in sequence
+    if numpositions% = 0 then Message("You must choose different start and stop positions.\nTask not started!"); return 1; endif
+    
+    
+    ' We now convert to bits after start and end position have been calculated (e.g., sH, eH) to avoid integer overflow
+    lzstartdegs:=sqLzStart;
+'    lzstartbits%:=Round(lzstartdegs*BitsPerLzDeg);
+    lzstepdegs:=sqLzStep;
+'    lzstepbits%:=Round(lzstepdegs*BitsPerLzDeg);
+    lzenddegs:=sqLzEnd;
+'    lzendbits%:=Round(lzenddegs*BitsPerLzDeg);
+    
+    'If going from right to left, or up to down, switch step direction
+    if lzenddegs < lzstartdegs then
+        lzstepdegs:=-lzstepdegs;
+    endif
+    
+    lzHoffdegs:=sqLzHOffset;
+    lzVoffdegs:=sqLzVOffset;
+    lzHoffbits%:=Round(lzHoffdegs*BitsPerHLzDeg);
+    lzVoffbits%:=Round(lzVoffdegs*BitsPerVLzDeg);
+         
+    rewdlyst%:=rewdly%/SeqStepMS;					'Convert time in ms to sequencer steps
+    rewtmst%:=sqrewtm%/SeqStepMS;					'Convert time in ms to sequencer steps  
+    'Add variable for fix time to dialog
+    fixtmst%:=sqfixtm%/SeqStepMS/StepsPerEIWLoop;					'Divide by StepsPerEIWLoop because StepsPerEIWLoop steps occupy one loop    
+    holdtmst%:=sqholdtm%/SeqStepMS/StepsPerEIWLoop;			'Divide by 25 because 25 steps occupy one loop
+    sacdlyst%:=sqdelayeiw%/SeqStepMS/StepsPerEIWLoop;
+    
+    ITIst%:=sqITI%/SeqStepMS;							'Convert time in ms to sequencer steps
+    ITIBst%:=sqITIB%/SeqStepMS;							'Convert time in ms to sequencer steps
+    
+    tkwinsz:=sqTkwinsz;                      'Set globally
+    tkwinbits%:=6553.6*(tkwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    fxwinsz:=sqFxwinsz;                      'Set globally
+    fxwinbits%:=6553.6*(fxwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    
+    
+    'Generate task-specific arrays: all array elements should default to zero, so arrays will be zero padded where
+    'values aren't explicitely set
+    
+    docase 
+        
+    case sqMODE%=0 then     'Horizontal
+        for i%:=0 to numpositions%-1 do
+            sH[i%]:=lzstartdegs;
+            eH[i%]:=lzstartdegs + (i%+1)*lzstepdegs;
+            sV[i%]:=0;    'Vertical are included here in case we want to add offsets later
+            eV[i%]:=0;
+        next
+                
+    case sqMODE%=1 then        'Vertical
+        for i%:=0 to numpositions%-1 do
+            sH[i%]:=0;    'Horizontal are included here in case we want to add offsets later
+            eH[i%]:=0;
+            sV[i%]:=lzstartdegs;
+            eV[i%]:=lzstartdegs + (i%+1)*lzstepdegs;
+        next    
+        
+    endcase
+    
+    ' First convert the degrees to bits
+    ArrMul(sH,BitsPerHLzDeg);
+    ArrMul(eH,BitsPerHLzDeg);
+    ArrMul(sV,BitsPerVLzDeg);
+    ArrMul(eV,BitsPerVLzDeg);
+    
+    'Then assign to integer array, truncating
+    ArrConst(startH%,sH);
+    ArrConst(endH%,eH);
+    ArrConst(startV%,sV);
+    ArrConst(endV%,eV);
+    
+    ArrAdd(startH%,lzHoffbits%);
+    ArrAdd(endH%,lzHoffbits%);
+    ArrAdd(startV%,lzVoffbits%);
+    ArrAdd(endV%,lzVoffbits%);
+    
+    
+    'Now create all other arrays
+    for i%:=0 to numpositions%-1 do
+        holdtimes%[i%]:=holdtmst%;
+        rewardtimes%[i%]:=rewtmst%;
+        markers%[i%]:=mark%;
+		fixtimes%[i%]:=0;
+    next
+    
+    'Generate Paramtable
+    ArrConst(ParamTable%[0*TABLELENGTH%:TABLELENGTH%],startH%[]);
+    ArrConst(ParamTable%[1*TABLELENGTH%:TABLELENGTH%],endH%[]);
+    ArrConst(ParamTable%[2*TABLELENGTH%:TABLELENGTH%],startV%[]);
+    ArrConst(ParamTable%[3*TABLELENGTH%:TABLELENGTH%],endV%[]);
+    ArrConst(ParamTable%[4*TABLELENGTH%:TABLELENGTH%],holdtimes%[]);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    ArrConst(ParamTable%[6*TABLELENGTH%:TABLELENGTH%],markers%[]);
+	ArrConst(ParamTable%[7*TABLELENGTH%:TABLELENGTH%],fixtmst%);    'Use scalar, since we don't need to randomize fix time
+    
+    'This code overrides the instructions above that fill reward times into ParamTable
+    smrew%:=sqrewtm%;
+    MakeRandRewArray%(rewardtimes%[],smrew%/SeqStepMS,bgrew%/SeqStepMS,bgrewpcnt%);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    
+    if BUG% then
+        ClearLog%();
+        for i%:=0 to len(ParamTable%[])-1 do
+            PrintLog("ParamTable %d: %d\n",i%,ParamTable%[i%]);
+        next
+        
+        yield();
+    endif
+       
+    if EYE%=1 then   'If continuous mode, switch to trial mode, since continuous is meaningless in this mode
+        EYE%:=0;
+    endif
+    
+    TASK%:=9;
+    oldtTask$:=tTask$;
+    tTask$:="Sequential Saccade, "+"Pos="+Str$(sqLzStart)+", Step=" +Str$(sqLzStep)+", End="+Str$(sqLzEnd)+", Type="+Str$(sqMODE%);
+    
+    if P1401% then          'If we are sampling
+        Pause%();       'pause task to pass variables to sequencer
+       
+        'Pass everything to sequencer
+        SampleSeqVar(seqRewDly%,rewdlyst%);
+        SampleSeqVar(seqITIA%,ITIst%);					'set ITI variable in sequencer
+        SampleSeqVar(seqITIB%,ITIBst%);					'set 2nd ITI variable in sequencer
+        SampleSeqVar(seqTASK%,TASK%);			'9=Seq Saccade
+        SampleSeqVar(seqEYE%,2);         'Hard code it so we don't change bar/eye trial/eye cont
+        SampleSeqVar(seqSKIPREW%,SKIPREWARD%);
+        SampleSeqVar(seqTkWinSz%,tkwinbits%);
+        SampleSeqVar(seqFxWinSz%,fxwinbits%);
+        SampleSeqVar(seqDlyst%,sacdlyst%);
+        SampleSeqVar(seqSkipWt%,1000);      'Make it ridiculously large
+        SampleSeqVar(seqLZON%,1);
+        
+        SampleSeqVar(seqSeqCnt%,numpositions%); 'Use SKIPWT for number of sequences
+        SampleSeqVar(seqIndex%,0);          'Reset table index
+        SampleSeqTable(ParamTable%[]);
+        
+        yield(.1);		'Wait 100 ms to make sure variables received
+        Start%();       'Now start it back up
+    endif
+    
+endif
+
+return 1;
+end
+
+func SwitchSeqDirection%(item%)
+var chk%,start,stop;
+'NOTE that all dialog position values are hard coded here and will need to be changed if dialog layout is ever altered.
+
+'chk%:=DlgValue(11);
+
+if item%=12 and DlgValue(12)=1 then
+    start:=DlgValue(9);
+    stop:=DlgValue(11);
+    
+    DlgValue(9,stop);
+    DlgValue(11,start);
+    DlgValue(item%,0);
+endif
+
+'Run this check every time a value is changed in dialog
+if DlgValue(8)=1 then       'If using Simple Mode, disable step size box
+    DlgEnable(0,10);
+else
+    DlgEnable(1,10);
+endif
+
+return 1;
+end
+
+func Saccade%()
+var ok%;
+var i%:=1;
+var j%:=1;
+var k%,m%;
+
+var mark%:=42;       'Base mark "*" (k is added to it to give all directions)
+
+var holdtmst%;		'Hold time in sequencer steps (counter)
+var ITIst%;			'ITI in sequencer steps
+var ITIBst%;		'2nd ITI in sequencer steps
+var rewdlyst%;		'Reward delay time in sequencer steps
+var rewtmst%;		'Reward time in sequencer steps
+var fixtmst%;	'Fix time in sequencer steps--one for fixation (because decremented in sequencer)
+var sacdlyst%;
+
+var tmprandholdtm%[TABLELENGTH%];    'For generating random holdtime to add to base holdtime array
+var randholdtmst%[TABLELENGTH%];		'...in sequencer steps (counter)
+var tmprandfixtm%[TABLELENGTH%];
+var randfixtmst%[TABLELENGTH%];
+
+var lzposdegs, Hlzposbits%, Vlzposbits%;
+var lzHoffdegs, lzHoffbits%, lzVoffdegs, lzVoffbits%;
+var sH%[9],eH%[9],sV%[9],eV%[9];
+var tkwinbits%,fxwinbits%;
+
+var numpositions%,n%,r%;
+'Arrays used to load paramtable%
+var tmp[TABLELENGTH%];		            'array used for random permutation
+var startH%[TABLELENGTH%];				'starting position of horizontal laser
+var endH%[TABLELENGTH%];				'ending position of horizontal laser
+var startV%[TABLELENGTH%];				'starting position of vertical laser
+var endV%[TABLELENGTH%];				'ending position of vertical laser
+var holdtimes%[TABLELENGTH%];			'fixed or randomized
+var rewardtimes%[TABLELENGTH%];		'fixed or biased
+var markers%[TABLELENGTH%];         'In decimal
+var fixtimes%[TABLELENGTH%];
+
+'Arrays to determine laser direction
+var Hdirs%[9],Vdirs%[9];
+
+Hdirs%[0]:=-1;
+Hdirs%[1]:=0;
+Hdirs%[2]:=1;
+Hdirs%[3]:=-1;
+Hdirs%[4]:=0;
+Hdirs%[5]:=1;
+Hdirs%[6]:=-1;
+Hdirs%[7]:=0;
+Hdirs%[8]:=1;
+
+Vdirs%[0]:=1;
+Vdirs%[1]:=1;
+Vdirs%[2]:=1;
+Vdirs%[3]:=0;
+Vdirs%[4]:=0;
+Vdirs%[5]:=0;
+Vdirs%[6]:=-1;
+Vdirs%[7]:=-1;
+Vdirs%[8]:=-1;
+
+DlgCreate("Saccade Parameters (RUN will run saccade task)",0,0,70,21);
+DlgInteger(i%,"ITI and Bad Timeout (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",1,100000,48,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Fix time Base and Random (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",0,50000,48,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Hold time Base and Random (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",0,50000,48,j%); i%+=1; j%+=2;
+DlgInteger(i%,"&Reward Time and Delay (ms)",1,10000,33,j%); i%+=1;
+DlgInteger(i%,"",1,10000,48,j%); i%+=1; j%+=2;
+DlgReal(i%,"Target &distance from center",0.0,30.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Target Horiz and Vert &offset",-30.0,30.0,33,j%); i%+=1;
+DlgReal(i%,"",-30.0,30.0,48,j%); i%+=1; j%+=1;
+DlgReal(i%,"Initial window size for fixation",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"&Window size for saccades",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgInteger(i%,"Delay before EIW check (ms)",1,10000,40,j%); i%+=1; j%+=2;
+DlgList(i%,"Saccade type","Centrifugal|Centripetal|Out-and-Back",3,15,j%); i%+=1; j%+=1;
+DlgList(i%,"Trial ordering","Block|Random|Sequential",3,15,j%); i%+=1; j%+=2;
+DlgText("Positions to use",30,j%); j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%);
+
+DlgAllow(ALLOWED%,IdleProc%);
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"RUN|0x0d");
+DlgButton(2,"Save|0x20");
+ok%:=DlgShow(sITI%,sITIB%,sfixtm%,srandfixtm%,sholdtm%,srandholdtm%,srewtm%,rewdly%,sLzPos,sLzHOffset,sLzVOffset,sFxwinsz,sTkwinsz,sdelayeiw%,sMODE%,sRAND%,sdirs%[]);
+
+'ok%=2 means "Save" was pressed.  This does nothing but save the values that were changed for next time.
+
+if ok%=1 then  'If user selects OK
+    
+    if srewtm% >= 1000 then
+        Message("Reward size of " + Str$(srewtm%) + " is rather large.  Make sure you didn't accidently type an extra zero.\n" + 
+        "                              NOTE: You'll need to correct the value yourself.");
+    endif
+        
+    'First figure out how many different positions we need to put in table
+    numpositions%:=ArrSum(sdirs%[]);
+    if numpositions% = 0 then Message("You must choose at least one position.\nTask not started!"); return 1; endif
+    n%:=Trunc(TABLELENGTH%/numpositions%);      'Get whole number of times to repeat positions
+    r%:=TABLELENGTH% mod numpositions%;         'Get remaining spaces left in array
+    
+    lzposdegs:=sLzPos;
+    Hlzposbits%:=Round(lzposdegs*BitsPerHLzDeg);
+    Vlzposbits%:=Round(lzposdegs*BitsPerVLzDeg);
+   
+    lzHoffdegs:=sLzHOffset;
+    lzVoffdegs:=sLzVOffset;
+    lzHoffbits%:=Round(lzHoffdegs*BitsPerHLzDeg);
+    lzVoffbits%:=Round(lzVoffdegs*BitsPerVLzDeg);
+    
+    'sH%:=0;
+    'eH%:=lzposbits%;
+    'sV%:=0;
+    'eV%:=lzposbits%;
+    
+    ArrConst(sH%[],Hdirs%[]);
+    ArrConst(eH%[],Hdirs%[]);
+    ArrConst(sV%[],Vdirs%[]);
+    ArrConst(eV%[],Vdirs%[]);
+    
+    ArrMul(sH%[],0);
+    ArrMul(eH%[],Hlzposbits%);
+    ArrMul(sV%[],0);
+    ArrMul(eV%[],Vlzposbits%);
+    
+    ArrAdd(sH%[],lzHoffbits%);
+    ArrAdd(eH%[],lzHoffbits%);
+    ArrAdd(sV%[],lzVoffbits%);
+    ArrAdd(eV%[],lzVoffbits%);
+    
+    if sMODE%=1 then        'If doing Centripetal then swap beginning and end
+        Arrswap(sH%[],eH%[]);
+        Arrswap(sV%[],eV%[]);
+    endif
+    
+    if EYE%=1 then   'If continuous mode, switch to trial mode, since continuous is meaningless in this mode
+        EYE%:=0;
+    endif
+    
+    rewdlyst%:=rewdly%/SeqStepMS;					'Convert time in ms to sequencer steps
+    rewtmst%:=srewtm%/SeqStepMS;					'Convert time in ms to sequencer steps  
+    'Add variable for fix time to dialog
+    fixtmst%:=sfixtm%/SeqStepMS/StepsPerEIWLoop;					'Divide by StepsPerEIWLoop because StepsPerEIWLoop steps occupy one loop    
+    holdtmst%:=sholdtm%/SeqStepMS/StepsPerEIWLoop;			'Divide by 25 because 25 steps occupy one loop
+    sacdlyst%:=sdelayeiw%/SeqStepMS/StepsPerEIWLoop;
+    
+    ITIst%:=sITI%/SeqStepMS;							'Convert time in ms to sequencer steps
+    ITIBst%:=sITIB%/SeqStepMS;							'Convert time in ms to sequencer steps
+    
+    tkwinsz:=sTkwinsz;                      'Set globally
+    tkwinbits%:=6553.6*(tkwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    fxwinsz:=sFxwinsz;                      'Set globally
+    fxwinbits%:=6553.6*(fxwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    
+'    if sMODE%=1 then
+'        swap%(tkwinbits%,fxwinbits%);       'Swap start and end window sizes for Centripetal
+'    endif
+     
+    Rand(tmprandholdtm%[],srandholdtm%);
+    ArrConst(randholdtmst%[],tmprandholdtm%[]);
+    ArrDiv(randholdtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randholdtmst%[],StepsPerEIWLoop);
+    
+    Rand(tmprandfixtm%[],srandfixtm%);
+    
+    ArrConst(randfixtmst%[],tmprandfixtm%[]);
+    ArrDiv(randfixtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randfixtmst%[],StepsPerEIWLoop);
+    
+        
+    'Now loop through for each position and assign values to table
+    'Need to modify for sequential saccades; reverse start and end for outside in
+    m%:=0;
+    for k%:=0 to Len(sdirs%[])-1 do
+        if sdirs%[k%] = 1 then
+            fillarray%(startH%[],sH%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(endH%[],eH%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(startV%[],sV%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(endV%[],eV%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(holdtimes%[],holdtmst%,m%*n%,m%*n%+n%-1);
+			fillarray%(fixtimes%[],fixtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(rewardtimes%[],rewtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(markers%[],mark%+k%,m%*n%,m%*n%+n%-1);
+            
+            m%+=1;       'Advance counter to fill next group of values            
+        endif
+    next
+    
+    'Fill in remaining spaces of array (just use last r% values, since r% will be pretty small)
+    if r%>0 then
+        for k%:=1 to r% do    
+            startH%[TABLELENGTH%-k%]:=startH%[TABLELENGTH%-r%-k%];
+            endH%[TABLELENGTH%-k%]:=endH%[TABLELENGTH%-r%-k%];
+            startV%[TABLELENGTH%-k%]:=startV%[TABLELENGTH%-r%-k%];
+            endV%[TABLELENGTH%-k%]:=endV%[TABLELENGTH%-r%-k%];
+            holdtimes%[TABLELENGTH%-k%]:=holdtimes%[TABLELENGTH%-r%-k%];
+            fixtimes%[TABLELENGTH%-k%]:=fixtimes%[TABLELENGTH%-r%-k%];
+            rewardtimes%[TABLELENGTH%-k%]:=rewardtimes%[TABLELENGTH%-r%-k%];
+            markers%[TABLELENGTH%-k%]:=markers%[TABLELENGTH%-r%-k%];
+        next
+    endif
+    
+    'Add random times to base hold times
+    ArrAdd(holdtimes%[],randholdtmst%[]);
+    
+    'Add random times to base fix times
+    ArrAdd(fixtimes%[],randfixtmst%[]);
+    
+    
+    if sRAND% = 1 then
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],fixtimes%[],rewardtimes%[],markers%[]);
+        'Do it again
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],fixtimes%[],rewardtimes%[],markers%[]);
+    endif
+    
+    if REWRAND% = 1 then
+        Rand(rewardtimes%[],rewtmst%-(25/SeqStepMS),25/SeqStepMS);     'Generate random array between 25 msec and rewtm msec
+    endif
+    
+    'Generate Paramtable
+    ArrConst(ParamTable%[0*TABLELENGTH%:TABLELENGTH%],startH%[]);
+    ArrConst(ParamTable%[1*TABLELENGTH%:TABLELENGTH%],endH%[]);
+    ArrConst(ParamTable%[2*TABLELENGTH%:TABLELENGTH%],startV%[]);
+    ArrConst(ParamTable%[3*TABLELENGTH%:TABLELENGTH%],endV%[]);
+    ArrConst(ParamTable%[4*TABLELENGTH%:TABLELENGTH%],holdtimes%[]);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    ArrConst(ParamTable%[6*TABLELENGTH%:TABLELENGTH%],markers%[]);
+    ArrConst(ParamTable%[7*TABLELENGTH%:TABLELENGTH%],fixtimes%[]);
+    
+    'This code overrides the instructions above that fill reward times into ParamTable
+    smrew%:=srewtm%;
+    MakeRandRewArray%(rewardtimes%[],smrew%/SeqStepMS,bgrew%/SeqStepMS,bgrewpcnt%);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    
+    if BUG% then
+        ClearLog%();
+        for i%:=0 to len(ParamTable%[])-1 do
+            PrintLog("ParamTable %d: %d\n",i%,ParamTable%[i%]);
+        next
+        
+        yield();
+    endif
+    
+    TASK%:=2;
+    oldtTask$:=tTask$;
+    tTask$:="Saccade, "+"Pos="+Str$(sLzPos)+", Offset=(" +Str$(sLzHOffset)+","+Str$(sLzVOffset)+"), Type="+Str$(sMODE%);
+    
+    if P1401% then          'If we are sampling
+        Pause%();       'pause task to pass variables to sequencer
+           
+        'Pass everything to sequencer
+        SampleSeqVar(seqRewDly%,rewdlyst%);
+        SampleSeqVar(seqITIA%,ITIst%);					'set ITI variable in sequencer
+        SampleSeqVar(seqITIB%,ITIBst%);					'set 2nd ITI variable in sequencer
+        SampleSeqVar(seqTASK%,TASK%);			'2=Saccade
+        SampleSeqVar(seqEYE%,EYE%);         'if eye mode updated by dialog, need to send to sequencer
+        SampleSeqVar(seqTkWinSz%,tkwinbits%);
+        SampleSeqVar(seqFxWinSz%,fxwinbits%);
+        SampleSeqVar(seqDlyst%,sacdlyst%);
+        SampleSeqVar(seqLZON%,1);
+        
+        if sMODE% = 2 then
+            SampleSeqVar(seqOPTION%,1);     'Do out-and-back
+        else
+            SampleSeqVar(seqOPTION%,0);     'All other saccade types
+        endif
+        
+        SampleSeqVar(seqIndex%,0);          'Reset table index
+        SampleSeqTable(ParamTable%[]);
+        
+        yield(.1);		'Wait 100 ms to make sure variables received
+        Start%();       'Now start it back up
+    endif
+    
+endif  
+
+return 1;
+end
+
+func RPursuit%()
+
+var ok%;
+var i%:=1;
+var j%:=1;
+var k%,m%;
+
+var mark%:=51;       'Base mark "3" (k is added to it to give all directions)
+
+var holdtmst%;		'Hold time in sequencer steps (counter)
+var ITIst%;			'ITI in sequencer steps
+var ITIBst%;		'2nd ITI in sequencer steps
+var rewdlyst%;		'Reward delay time in sequencer steps
+var rewtmst%;		'Reward time in sequencer steps
+var fixtmst%;	'Fix time in sequencer steps--one for fixation (because decremented in sequencer)
+var purdlyst%;
+var backstep%;  'distance laser should step back for step-ramp pursuit
+
+var tmprandholdtm%[TABLELENGTH%];    'For generating random holdtime to add to base holdtime array
+var randholdtmst%[TABLELENGTH%];		'...in sequencer steps (counter)
+var tmprandfixtm%[TABLELENGTH%];
+var randfixtmst%[TABLELENGTH%];
+
+var lzposdegs, Hlzposbits%, Vlzposbits%;
+var lzHoffdegs, lzHoffbits%, lzVoffdegs, lzVoffbits%;
+var Hlzvelbits%, Vlzvelbits%;
+'var sH%,eH%,sV%,eV%;
+var sH%[8],eH%[8],sV%[8],eV%[8];
+var Hlzstep%,Vlzstep%;
+var tkwinbits%,fxwinbits%;
+
+var numpositions%,n%,r%;
+'Arrays used to load paramtable%
+var tmp[TABLELENGTH%];		            'array used for random permutation
+var startH%[TABLELENGTH%];				'starting position of horizontal laser
+var endH%[TABLELENGTH%];				'ending position of horizontal laser
+var startV%[TABLELENGTH%];				'starting position of vertical laser
+var endV%[TABLELENGTH%];				'ending position of vertical laser
+var holdtimes%[TABLELENGTH%];			'fixed or randomized
+var rewardtimes%[TABLELENGTH%];		'fixed or biased
+var markers%[TABLELENGTH%];         'In decimal
+var chrpos%[TABLELENGTH%];        'Placeholder
+var Hstep%[TABLELENGTH%];         'Backward step for step ramp pursuit
+var Vstep%[TABLELENGTH%];         'Backward step for step ramp pursuit
+var fixtimes%[TABLELENGTH%]; 
+
+'Arrays to determine laser direction
+var Hdirs%[8],Vdirs%[8];
+
+Hdirs%[0]:=-1;
+Hdirs%[1]:=0;
+Hdirs%[2]:=1;
+Hdirs%[3]:=-1;
+Hdirs%[4]:=1;
+Hdirs%[5]:=-1;
+Hdirs%[6]:=0;
+Hdirs%[7]:=1;
+
+Vdirs%[0]:=1;
+Vdirs%[1]:=1;
+Vdirs%[2]:=1;
+Vdirs%[3]:=0;
+Vdirs%[4]:=0;
+Vdirs%[5]:=-1;
+Vdirs%[6]:=-1;
+Vdirs%[7]:=-1;
+
+DlgCreate("Ramp Pursuit Parameters (RUN will run pursuit task)",0,0,70,23);
+DlgInteger(i%,"ITI and Bad Timeout (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",1,100000,48,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Fix time Base and Random (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",0,50000,48,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Hold time Base and Random (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",0,50000,48,j%); i%+=1; j%+=2;
+DlgInteger(i%,"&Reward Time and Delay (ms)",1,10000,33,j%); i%+=1;
+DlgInteger(i%,"",1,10000,48,j%); i%+=1; j%+=2;
+DlgReal(i%,"Target &distance from center",0.0,30.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Target Horiz and Vert &offset",-30.0,30.0,33,j%); i%+=1;
+DlgReal(i%,"",-30.0,30.0,48,j%); i%+=1; j%+=1;
+DlgReal(i%,"Target &velocity",0.0,50.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Initial window size for fixation",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"&Window size for pursuit",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgInteger(i%,"Delay before EIW check (ms)",1,10000,40,j%); i%+=1; j%+=1;
+DlgInteger(i%,"Pursuit system delay (ms)",0,10000,40,j%); i%+=1; j%+=2;
+DlgList(i%,"Trial ordering","Block|Random",2,15,j%); i%+=1; j%+=1;
+DlgList(i%,"Pursuit type","Centrifugal|Centripetal|FullLength",3,15,j%); i%+=1; j%+=2;
+DlgText("Positions to use",30,j%); j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%);
+
+DlgAllow(ALLOWED%,IdleProc%);
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"RUN|0x0d");
+DlgButton(2,"Save|0x20");
+ok%:=DlgShow(rpITI%,rpITIB%,rpfixtm%,rprandfixtm%,rpholdtm%,rprandholdtm%,rprewtm%,rewdly%,rpLzPos,rpLzHOffset,rpLzVOffset,rpLzVel,rpFxwinsz,rpTkwinsz,rpdelayeiw%,rpeyedelay%, rpRAND%,rpMODE%,rpdirs%[]);
+
+if ok%=1 then  'If user selects OK and we are sampling, generate task and send to sequencer
+    
+    if rprewtm% >= 1000 then
+        Message("Reward size of " + Str$(rprewtm%) + " is rather large.  Make sure you didn't accidently type an extra zero.\n" + 
+        "                              NOTE: You'll need to correct the value yourself.");
+    endif
+        
+    'First figure out how many different positions we need to put in table
+    numpositions%:=ArrSum(rpdirs%[]);
+    if numpositions% = 0 then Message("You must choose at least one position.\nTask not started!"); return 1; endif
+    n%:=Trunc(TABLELENGTH%/numpositions%);      'Get whole number of times to repeat positions
+    r%:=TABLELENGTH% mod numpositions%;         'Get remaining spaces left in array
+    
+    lzposdegs:=rpLzPos;
+    Hlzposbits%:=Round(lzposdegs*BitsPerHLzDeg);
+    Vlzposbits%:=Round(lzposdegs*BitsPerVLzDeg);
+    
+    lzHoffdegs:=rpLzHOffset;
+    lzVoffdegs:=rpLzVOffset;
+    lzHoffbits%:=Round(lzHoffdegs*BitsPerHLzDeg);
+    lzVoffbits%:=Round(lzVoffdegs*BitsPerVLzDeg);
+    
+    Hlzvelbits%:=(rpLzVel/1000)*BitsPerHLzDeg*SeqStepMS;	'Bits per sequencer step
+    Vlzvelbits%:=(rpLzVel/1000)*BitsPerVLzDeg*SeqStepMS;	'Bits per sequencer step
+    
+'    sH%:=0;
+'    eH%:=Hlzposbits%;
+'    sV%:=0;
+'    eV%:=Vlzposbits%;
+    
+    ArrConst(sH%[],Hdirs%[]);
+    ArrConst(eH%[],Hdirs%[]);
+    ArrConst(sV%[],Vdirs%[]);
+    ArrConst(eV%[],Vdirs%[]);
+    
+    docase
+        
+    case rpMODE%=0 then
+        ArrMul(sH%[],0);
+        ArrMul(eH%[],Hlzposbits%);
+        ArrMul(sV%[],0);
+        ArrMul(eV%[],Vlzposbits%);
+        Hlzstep%:=((rpLzVel/1000)*rpeyedelay%*BitsPerHLzDeg);
+        Vlzstep%:=((rpLzVel/1000)*rpeyedelay%*BitsPerVLzDeg);
+        
+    case rpMODE%=1 then
+        ArrMul(sH%[],Hlzposbits%);
+        ArrMul(eH%[],0);
+        ArrMul(sV%[],Vlzposbits%);
+        ArrMul(eV%[],0);
+        Hlzstep%:=-((rpLzVel/1000)*rpeyedelay%*BitsPerHLzDeg);
+        Vlzstep%:=-((rpLzVel/1000)*rpeyedelay%*BitsPerVLzDeg);
+        
+    case rpMODE%=2 then
+        ArrMul(sH%[],-Hlzposbits%);
+        ArrMul(eH%[],Hlzposbits%);
+        ArrMul(sV%[],-Vlzposbits%);
+        ArrMul(eV%[],Vlzposbits%);
+        Hlzstep%:=((rpLzVel/1000)*rpeyedelay%*BitsPerHLzDeg);
+        Vlzstep%:=((rpLzVel/1000)*rpeyedelay%*BitsPerVLzDeg);
+        
+    else    'Default to centrifugal
+        ArrMul(sH%[],0);
+        ArrMul(eH%[],Hlzposbits%);
+        ArrMul(sV%[],0);
+        ArrMul(eV%[],Vlzposbits%);
+        Hlzstep%:=((rpLzVel/1000)*rpeyedelay%*BitsPerHLzDeg);
+        Vlzstep%:=((rpLzVel/1000)*rpeyedelay%*BitsPerVLzDeg);
+       
+    endcase
+       
+    ArrAdd(sH%[],lzHoffbits%);
+    ArrAdd(eH%[],lzHoffbits%);
+    ArrAdd(sV%[],lzVoffbits%);
+    ArrAdd(eV%[],lzVoffbits%);
+    
+    if EYE%=1 then   'If continuous mode, switch to trial mode, since continuous is meaningless in this mode
+        EYE%:=0;
+    endif
+        
+    rewdlyst%:=rewdly%/SeqStepMS;					'Convert time in ms to sequencer steps
+    rewtmst%:=rprewtm%/SeqStepMS;					'Convert time in ms to sequencer steps  
+    'Add variable for fix time to dialog
+    fixtmst%:=rpfixtm%/SeqStepMS/StepsPerEIWLoop;					'Divide by StepsPerEIWLoop because StepsPerEIWLoop steps occupy one loop    
+    holdtmst%:=rpholdtm%/SeqStepMS/StepsPerEIWLoop;			'Divide by 25 because 25 steps occupy one loop
+    purdlyst%:=rpdelayeiw%/SeqStepMS/StepsPerEIWLoop;
+    
+    ITIst%:=rpITI%/SeqStepMS;							'Convert time in ms to sequencer steps
+    ITIBst%:=rpITIB%/SeqStepMS;							'Convert time in ms to sequencer steps
+    
+    tkwinsz:=rpTkwinsz;                      'Set globally
+    tkwinbits%:=6553.6*(tkwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    fxwinsz:=rpFxwinsz;                      'Set globally
+    fxwinbits%:=6553.6*(fxwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    
+'    if rpMODE%=1 then
+'        swap%(tkwinbits%,fxwinbits%);       'Swap start and end window sizes for Centripetal
+'    endif
+    
+    Rand(tmprandholdtm%[],rprandholdtm%);
+    ArrConst(randholdtmst%[],tmprandholdtm%[]);
+    ArrDiv(randholdtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randholdtmst%[],StepsPerEIWLoop);
+
+	 Rand(tmprandfixtm%[],rprandfixtm%);
+    ArrConst(randfixtmst%[],tmprandfixtm%[]);
+    ArrDiv(randfixtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randfixtmst%[],StepsPerEIWLoop);
+    
+    'Now loop through for each position and assign values to table
+    m%:=0;
+    for k%:=0 to Len(rpdirs%[])-1 do
+        if rpdirs%[k%] = 1 then
+'            fillarray%(startH%[],Hdirs%[k%]*sH%,m%*n%,m%*n%+n%-1);
+'            fillarray%(endH%[],Hdirs%[k%]*eH%,m%*n%,m%*n%+n%-1);
+'            fillarray%(startV%[],Vdirs%[k%]*sV%,m%*n%,m%*n%+n%-1);
+'            fillarray%(endV%[],Vdirs%[k%]*eV%,m%*n%,m%*n%+n%-1);
+            fillarray%(startH%[],sH%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(endH%[],eH%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(startV%[],sV%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(endV%[],eV%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(holdtimes%[],holdtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(rewardtimes%[],rewtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(markers%[],mark%+k%,m%*n%,m%*n%+n%-1);
+            fillarray%(chrpos%[],0,m%*n%,m%*n%+n%-1);               'Placeholder
+            fillarray%(Hstep%[],sH%[k%]-Hdirs%[k%]*Hlzstep%,m%*n%,m%*n%+n%-1);
+            fillarray%(Vstep%[],sV%[k%]-Vdirs%[k%]*Vlzstep%,m%*n%,m%*n%+n%-1);
+            fillarray%(fixtimes%[],fixtmst%,m%*n%,m%*n%+n%-1);           
+            m%+=1;       'Advance counter to fill next group of values            
+        endif
+    next
+    
+    'Fill in remaining spaces of array (just use last r% values, since r% will be pretty small)
+    if r%>0 then
+        for k%:=1 to r% do    
+            startH%[TABLELENGTH%-k%]:=startH%[TABLELENGTH%-r%-k%];
+            endH%[TABLELENGTH%-k%]:=endH%[TABLELENGTH%-r%-k%];
+            startV%[TABLELENGTH%-k%]:=startV%[TABLELENGTH%-r%-k%];
+            endV%[TABLELENGTH%-k%]:=endV%[TABLELENGTH%-r%-k%];
+            holdtimes%[TABLELENGTH%-k%]:=holdtimes%[TABLELENGTH%-r%-k%];
+			fixtimes%[TABLELENGTH%-k%]:=fixtimes%[TABLELENGTH%-r%-k%];		  
+            rewardtimes%[TABLELENGTH%-k%]:=rewardtimes%[TABLELENGTH%-r%-k%];
+            markers%[TABLELENGTH%-k%]:=markers%[TABLELENGTH%-r%-k%];
+            chrpos%[TABLELENGTH%-k%]:=chrpos%[TABLELENGTH%-r%-k%];
+            Hstep%[TABLELENGTH%-k%]:=Hstep%[TABLELENGTH%-r%-k%];
+            Vstep%[TABLELENGTH%-k%]:=Vstep%[TABLELENGTH%-r%-k%];
+        next
+    endif
+    
+    'Add random times to base hold times
+    ArrAdd(holdtimes%[],randholdtmst%[]);
+    
+	 'Add random times to base hold times
+    ArrAdd(fixtimes%[],randfixtmst%[]);
+
+    if rpRAND% = 1 then
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[],chrpos%[],Hstep%[],Vstep%[]);
+        'Do it again
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[],chrpos%[],Hstep%[],Vstep%[]);
+    endif
+    
+    if REWRAND% = 1 then
+        Rand(rewardtimes%[],rewtmst%-(25/SeqStepMS),25/SeqStepMS);     'Generate random array between 25 msec and rewtm msec
+    endif
+    
+    'Generate Paramtable
+    ArrConst(ParamTable%[0*TABLELENGTH%:TABLELENGTH%],startH%[]);
+    ArrConst(ParamTable%[1*TABLELENGTH%:TABLELENGTH%],endH%[]);
+    ArrConst(ParamTable%[2*TABLELENGTH%:TABLELENGTH%],startV%[]);
+    ArrConst(ParamTable%[3*TABLELENGTH%:TABLELENGTH%],endV%[]);
+    ArrConst(ParamTable%[4*TABLELENGTH%:TABLELENGTH%],holdtimes%[]);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    ArrConst(ParamTable%[6*TABLELENGTH%:TABLELENGTH%],markers%[]);
+	ArrConst(ParamTable%[7*TABLELENGTH%:TABLELENGTH%],fixtimes%[]);
+    ArrConst(ParamTable%[8*TABLELENGTH%:TABLELENGTH%],chrpos%[]);
+    ArrConst(ParamTable%[9*TABLELENGTH%:TABLELENGTH%],Hstep%[]);
+    ArrConst(ParamTable%[10*TABLELENGTH%:TABLELENGTH%],Vstep%[]);
+    
+    'This code overrides the instructions above that fill reward times into ParamTable
+'    if smrew% <> rprewtm% then
+        smrew%:=rprewtm%;
+        MakeRandRewArray%(rewardtimes%[],smrew%/SeqStepMS,bgrew%/SeqStepMS,bgrewpcnt%);
+        ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+'    endif
+    
+    if BUG% then
+        ClearLog%();
+        for i%:=0 to len(ParamTable%[])-1 do
+            PrintLog("ParamTable %d: %d\n",i%,ParamTable%[i%]);
+        next
+        
+        yield();
+    endif
+    
+    TASK%:=3;
+    oldtTask$:=tTask$;
+    tTask$:="Ramp Pursuit, "+"Pos="+Str$(rpLzPos)+", Vel="+Str$(rpLzVel) + ", Type="+Str$(rpMODE%);
+    
+    if P1401% then          'If we are sampling
+        Pause%();       'pause task to pass variables to sequencer
+
+        'Pass everything to sequencer
+        SampleSeqVar(seqRewDly%,rewdlyst%);
+        SampleSeqVar(seqITIA%,ITIst%);					'set ITI variable in sequencer
+        SampleSeqVar(seqITIB%,ITIBst%);					'set 2nd ITI variable in sequencer
+        SampleSeqVar(seqTASK%,TASK%);			'3=ramp pursuit
+        SampleSeqVar(seqEYE%,EYE%);         'if eye mode updated by dialog, need to send to sequencer
+        SampleSeqVar(seqTkWinSz%,tkwinbits%);
+        SampleSeqVar(seqFxWinSz%,fxwinbits%);
+        SampleSeqVar(seqDlyst%,purdlyst%);
+        SampleSeqVar(seqHLzvel%,Hlzvelbits%);
+        SampleSeqVar(seqVLzvel%,Vlzvelbits%);
+        SampleSeqVar(seqLZON%,1);
+        
+        if rpeyedelay% > 0 then
+            SampleSeqVar(seqOPTION%,1);
+        else
+            SampleSeqVar(seqOPTION%,0);
+        endif
+        
+        SampleSeqVar(seqIndex%,0);          'Reset table index
+        SampleSeqTable(ParamTable%[]);
+        
+        yield(.1);		'Wait 100 ms to make sure variables received
+        Start%();       'Now start it back up
+    endif
+    
+endif
+
+return 1;
+end
+
+Func Predict%()
+var ok%;
+var i%:=1;
+var j%:=1;
+var k%,m%;
+
+var mark%:=51;       'Base mark "3" (k is added to it to give all directions)
+
+var holdtmst%;		'Hold time in sequencer steps (counter)
+var movfixtmst%; 'ignoring moving laser time in seq steps (counter)
+var fixtmst%;	'Fix time in sequencer steps--one for fixation (because decremented in sequencer)
+var statfixtmst%; 'ignoring stationary laser time in seq steps
+var ITIst%;			'ITI in sequencer steps
+var ITIBst%;		'2nd ITI in sequencer steps
+var rewdlyst%;		'Reward delay time in sequencer steps
+var rewtmst%;		'Reward time in sequencer steps
+
+var purdlyst%;
+var backstep%;  'distance laser should step back for step-ramp pursuit
+
+var tmprandholdtm%[TABLELENGTH%];    'For generating random holdtime to add to base holdtime array
+var randholdtmst%[TABLELENGTH%];		'...in sequencer steps (counter)
+var tmprandfixtm%[TABLELENGTH%];
+var randfixtmst%[TABLELENGTH%];
+var tmprandmovtm%[TABLELENGTH%];
+var randmovtmst%[TABLELENGTH%];
+var tmprandstattm%[TABLELENGTH%];
+var randstattmst%[TABLELENGTH%];
+
+var lzposdegs, Hlzposbits%, Vlzposbits%;
+var lzHoffdegs, lzHoffbits%, lzVoffdegs, lzVoffbits%;
+var Hlzvelbits%, Vlzvelbits%;
+'var sH%,eH%,sV%,eV%;
+var sH%[8],eH%[8],sV%[8],eV%[8];
+'var Hlzstep%,Vlzstep%;
+var tkwinbits%,fxwinbits%;
+
+var numpositions%,n%,r%;
+'Arrays used to load paramtable%
+var tmp[TABLELENGTH%];		            'array used for random permutation
+var startH%[TABLELENGTH%];				'starting position of horizontal laser
+var endH%[TABLELENGTH%];				'ending position of horizontal laser
+var startV%[TABLELENGTH%];				'starting position of vertical laser
+var endV%[TABLELENGTH%];
+var fixtimes%[TABLELENGTH%];       'ending position of vertical laser
+var statfixtimes%[TABLELENGTH%];
+var movfixtimes%[TABLELENGTH%];
+var holdtimes%[TABLELENGTH%];			'fixed or randomized
+var rewardtimes%[TABLELENGTH%];	   'fixed or biased
+var markers%[TABLELENGTH%];         'In decimal
+var chrpos%[TABLELENGTH%];        'Placeholder
+'var Hstep%[TABLELENGTH%];         'Backward step for step ramp pursuit
+'var Vstep%[TABLELENGTH%];         'Backward step for step ramp pursuit
+'offsets[0]:=0;
+'offsets[1]:=0;
+
+'Arrays to determine laser direction
+var Hdirs%[8],Vdirs%[8];
+
+Hdirs%[0]:=-1;
+Hdirs%[1]:=0;
+Hdirs%[2]:=1;
+Hdirs%[3]:=-1;
+Hdirs%[4]:=1;
+Hdirs%[5]:=-1;
+Hdirs%[6]:=0;
+Hdirs%[7]:=1;
+
+Vdirs%[0]:=1;
+Vdirs%[1]:=1;
+Vdirs%[2]:=1;
+Vdirs%[3]:=0;
+Vdirs%[4]:=0;
+Vdirs%[5]:=-1;
+Vdirs%[6]:=-1;
+Vdirs%[7]:=-1;
+
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+DlgCreate("Target Interception Parameters (RUN will run task)",0,0,70,26);
+DlgInteger(i%,"ITI and Bad Timeout (ms)",1,100000,38,j%); i%+=1;
+DlgInteger(i%,"",1,100000,52,j%); i%+=1; j%+=2;
+DlgInteger(i%,"&Fix time Base and Random (ms)",1,100000,38,j%); i%+=1;
+DlgInteger(i%,"",0,50000,52,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Fix time target stat Base and Random (ms)",1,100000,38,j%); i%+=1;
+DlgInteger(i%,"",0,50000,52,j%); i%+=1; j%+=1;
+DlgInteger(i%,"Fix time target move and rand (ms)",0,100000,38,j%); i%+=1;
+DlgInteger(i%,"",0,50000,52,j%); i%+=1; j%+=1;
+DlgInteger(i%,"Hold time and rand (ms)",0,100000,38,j%); i%+=1;
+DlgInteger(i%,"",0,50000,52,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Reward Time and Delay (ms)",1,10000,38,j%); i%+=1;
+DlgInteger(i%,"",1,10000,52,j%); i%+=1; j%+=2;
+DlgReal(i%,"Target &distance from center",0.0,25.0,45,j%); i%+=1; j%+=1;
+DlgReal(i%,"Target Horiz and Vert &offset",-25.0,25.0,38,j%); i%+=1;
+DlgReal(i%,"",-13.0,13.0,52,j%); i%+=1; j%+=1;
+DlgReal(i%,"Target &velocity",0.0,50.0,45,j%); i%+=1; j%+=1;
+DlgReal(i%,"Initial window size for fixation",0.1,100.0,45,j%); i%+=1; j%+=1;
+DlgReal(i%,"&Window size for pursuit",0.1,100.0,45,j%); i%+=1; j%+=1;
+DlgInteger(i%,"Delay before EIW check (ms)",1,10000,45,j%); i%+=1; j%+=2;
+'DlgInteger(i%,"Pursuit system delay (ms)",0,10000,45,j%); i%+=1; j%+=2;
+DlgList(i%,"Trial ordering","Block|Random",2,15,j%); i%+=1; j%+=2;
+DlgText("Positions to use",30,j%); j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1; j%+=2;
+'DlgReal(i%,"Min Pos Range and Max Pos Range",1,100000,38,j%); i%+=1;
+'DlgReal(i%,"",0,50000,52,j%); i%+=1; j%+=1;
+prdRangeTextID%:=DlgText(prdRangeText$,0,j%);
+'DlgLabel(i%,prdpercentoverlap$, 30,j%); i%+=1;
+DlgAllow(ALLOWED%,IdleProc%,CalcPossPos%);
+
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"RUN|0x0d");
+DlgButton(2,"Save|0x20");
+ok%:=DlgShow(prdITI%,prdITIB%,prdfix%[],prdstat%[],prdmov%[],prdhold%[],prrewtm%,rewdly%,prdLzPos,prdoffsets,prdLzVel,prdFxwinsz,prdTkwinsz,prddelayeiw%,prdRAND%,prddirs%[]);
+
+if ok%=1 then  'If user selects OK and we are sampling, generate task and send to sequencer    Message("range is" + Str$(rangemin%)+ "to " Str$(rangemax%));     
+    prdfixtm%:=prdfix%[0];
+    prdrandfixtm%:=prdfix%[1]; 
+    prdstattm%:=prdstat%[0];
+    prdrandstattm%:=prdstat%[1];
+    prdmovtm%:=prdmov%[0];
+    prdrandmovtm%:=prdmov%[1];
+    prdholdtm%:=prdhold%[0];
+    prdrandholdtm%:=prdhold%[1];
+     
+    if prrewtm% >= 1000 then
+        Message("Reward size of " + Str$(prrewtm%) + " is rather large.  Make sure you didn't accidently type an extra zero.\n" + 
+        "                              NOTE: You'll need to correct the value yourself.");
+    endif
+    
+    'First figure out how many different positions we need to put in table
+    numpositions%:=ArrSum(prddirs%[]);
+    if numpositions% = 0 then Message("You must choose at least one position.\nTask not started!"); return 1; endif
+    n%:=Trunc(TABLELENGTH%/numpositions%);      'Get whole number of times to repeat positions
+    r%:=TABLELENGTH% mod numpositions%;         'Get remaining spaces left in array
+    
+    lzposdegs:=prdLzPos;
+    
+    if abs(lzposdegs) > (2147483647 / BitsPerLzDeg) then
+        Message("The laser position value %3.2f you entered is too big and will cause an integer overflow error.\nUsing maximum allowed position of 25 deg.",lzposdegs);
+        lzposdegs:=25;
+        prdLzPos:=25;
+    endif
+      
+    
+    Hlzposbits%:=Round(lzposdegs*BitsPerHLzDeg);
+    Vlzposbits%:=Round(lzposdegs*BitsPerVLzDeg);
+    
+    lzHoffdegs:=prdoffsets[0];
+    lzVoffdegs:=prdoffsets[1];
+    lzHoffbits%:=Round(lzHoffdegs*BitsPerHLzDeg);
+    lzVoffbits%:=Round(lzVoffdegs*BitsPerVLzDeg);
+    
+    Hlzvelbits%:=(prdLzVel/1000)*BitsPerHLzDeg*SeqStepMS;	'Bits per sequencer step
+    Vlzvelbits%:=(prdLzVel/1000)*BitsPerVLzDeg*SeqStepMS;	'Bits per sequencer step
+        
+    ArrConst(sH%[],Hdirs%[]);
+    ArrConst(eH%[],Hdirs%[]);
+    ArrConst(sV%[],Vdirs%[]);
+    ArrConst(eV%[],Vdirs%[]);
+    
+    ArrMul(sH%[],-Hlzposbits%);
+    ArrMul(eH%[],Hlzposbits%);
+    ArrMul(sV%[],-Vlzposbits%);
+    ArrMul(eV%[],Vlzposbits%);
+'    Hlzstep%:=((prdLzVel/1000)*prdeyedelay%*BitsPerLzDeg);
+'    Vlzstep%:=((prdLzVel/1000)*prdeyedelay%*BitsPerLzDeg);
+    
+    ArrAdd(sH%[],lzHoffbits%);
+    ArrAdd(eH%[],lzHoffbits%);
+    ArrAdd(sV%[],lzVoffbits%);
+    ArrAdd(eV%[],lzVoffbits%);
+
+    if EYE%=1 then   'If continuous mode, switch to trial mode, since continuous is meaningless in this mode
+        EYE%:=0;
+    endif
+    
+    rewdlyst%:=rewdly%/SeqStepMS;					'Convert time in ms to sequencer steps
+    rewtmst%:=prrewtm%/SeqStepMS;					'Convert time in ms to sequencer steps  
+    'Add variable for fix time to dialog
+    fixtmst%:=prdfixtm%/SeqStepMS/StepsPerEIWLoop;					'Divide by 30 because 30 steps occupy one loop    
+    holdtmst%:=prdholdtm%/SeqStepMS/StepsPerEIWLoop;			'Divide by 30 because 30 steps occupy one loop
+    movfixtmst%:=prdmovtm%/SeqStepMS/StepsPerEIWLoop;
+    statfixtmst%:=prdstattm%/SeqStepMS/StepsPerEIWLoop;
+    
+    purdlyst%:=prddelayeiw%/SeqStepMS/StepsPerEIWLoop;
+    
+    ITIst%:=prdITI%/SeqStepMS;							'Convert time in ms to sequencer steps
+    ITIBst%:=prdITIB%/SeqStepMS;							'Convert time in ms to sequencer steps
+    
+    tkwinsz:=prdTkwinsz;                      'Set globally
+    tkwinbits%:=6553.6*(tkwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    fxwinsz:=prdFxwinsz;                      'Set globally
+    fxwinbits%:=6553.6*(fxwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    
+    '    if prdMODE%=1 then
+    '        swap%(tkwinbits%,fxwinbits%);       'Swap start and end window sizes for Centripetal
+    '    endif 
+    
+    Rand(tmprandholdtm%[],prdrandholdtm%);
+    ArrConst(randholdtmst%[],tmprandholdtm%[]);
+    ArrDiv(randholdtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randholdtmst%[],StepsPerEIWLoop);
+      
+    Rand(tmprandfixtm%[],prdrandfixtm%);
+    ArrConst(randfixtmst%[],tmprandfixtm%[]);
+    ArrDiv(randfixtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randfixtmst%[],StepsPerEIWLoop);
+    
+    Rand(tmprandmovtm%[],prdrandmovtm%);
+    ArrConst(randmovtmst%[],tmprandmovtm%[]);
+    ArrDiv(randmovtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randmovtmst%[],StepsPerEIWLoop);
+    
+    Rand(tmprandstattm%[],prdrandstattm%);
+    ArrConst(randstattmst%[],tmprandstattm%[]);
+    ArrDiv(randstattmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randstattmst%[],StepsPerEIWLoop);
+    
+    'Now loop through for each position and assign values to table
+    m%:=0;
+    for k%:=0 to Len(prddirs%[])-1 do
+        if prddirs%[k%] = 1 then
+'            fillarray%(startH%[],Hdirs%[k%]*sH%,m%*n%,m%*n%+n%-1);
+'            fillarray%(endH%[],Hdirs%[k%]*eH%,m%*n%,m%*n%+n%-1);
+'            fillarray%(startV%[],Vdirs%[k%]*sV%,m%*n%,m%*n%+n%-1);
+'            fillarray%(endV%[],Vdirs%[k%]*eV%,m%*n%,m%*n%+n%-1);
+            fillarray%(startH%[],sH%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(endH%[],eH%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(startV%[],sV%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(endV%[],eV%[k%],m%*n%,m%*n%+n%-1);
+            fillarray%(fixtimes%[],fixtmst%,m%*n%,m%*n%+n%-1);   
+            fillarray%(holdtimes%[],holdtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(rewardtimes%[],rewtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(markers%[],mark%+k%,m%*n%,m%*n%+n%-1);
+            fillarray%(chrpos%[],0,m%*n%,m%*n%+n%-1);               'Placeholder
+'            fillarray%(Hstep%[],Hdirs%[k%]*sH%[k%]-Hdirs%[k%]*Hlzstep%,m%*n%,m%*n%+n%-1);
+'            fillarray%(Vstep%[],Vdirs%[k%]*sV%[k%]-Vdirs%[k%]*Vlzstep%,m%*n%,m%*n%+n%-1);
+            fillarray%(statfixtimes%[],statfixtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(movfixtimes%[],movfixtmst%,m%*n%,m%*n%+n%-1);
+            m%+=1;       'Advance counter to fill next group of values            
+        endif
+        next
+  
+    
+    'Fill in remaining spaces of array (just use last r% values, since r% will be pretty small)
+    if r%>0 then
+        for k%:=1 to r% do    
+            startH%[TABLELENGTH%-k%]:=startH%[TABLELENGTH%-r%-k%];
+            endH%[TABLELENGTH%-k%]:=endH%[TABLELENGTH%-r%-k%];
+            startV%[TABLELENGTH%-k%]:=startV%[TABLELENGTH%-r%-k%];
+            endV%[TABLELENGTH%-k%]:=endV%[TABLELENGTH%-r%-k%];
+            holdtimes%[TABLELENGTH%-k%]:=holdtimes%[TABLELENGTH%-r%-k%];
+			fixtimes%[TABLELENGTH%-k%]:=fixtimes%[TABLELENGTH%-r%-k%];		  
+            rewardtimes%[TABLELENGTH%-k%]:=rewardtimes%[TABLELENGTH%-r%-k%];
+            markers%[TABLELENGTH%-k%]:=markers%[TABLELENGTH%-r%-k%];
+            chrpos%[TABLELENGTH%-k%]:=chrpos%[TABLELENGTH%-r%-k%];
+'            Hstep%[TABLELENGTH%-k%]:=Hstep%[TABLELENGTH%-r%-k%];
+'            Vstep%[TABLELENGTH%-k%]:=Vstep%[TABLELENGTH%-r%-k%];
+            statfixtimes%[TABLELENGTH%-k%]:=statfixtimes%[TABLELENGTH%-r%-k%];
+            movfixtimes%[TABLELENGTH%-k%]:=movfixtimes%[TABLELENGTH%-r%-k%];
+            next
+    endif
+    
+    'Add random times to base hold times
+    ArrAdd(holdtimes%[],randholdtmst%[]);
+    
+    'Add random times to base hold times
+    ArrAdd(fixtimes%[],randfixtmst%[]);
+    
+    'Add random times to base stat times
+    ArrAdd(statfixtimes%[],randstattmst%[]);
+    
+    'Add random times to base mov times
+    ArrAdd(movfixtimes%[],randmovtmst%[]);
+    
+    if prdRAND% = 1 then
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],fixtimes%[],holdtimes%[],rewardtimes%[],markers%[],chrpos%[],statfixtimes%[],movfixtimes%[]);
+        'Do it again
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],fixtimes%[],holdtimes%[],rewardtimes%[],markers%[],chrpos%[],statfixtimes%[],movfixtimes%[]);
+    endif
+    
+    if REWRAND% = 1 then
+        Rand(rewardtimes%[],rewtmst%-(25/SeqStepMS),25/SeqStepMS);     'Generate random array between 25 msec and rewtm msec
+    endif
+    
+    'Generate Paramtable   
+    ArrConst(ParamTable%[0*TABLELENGTH%:TABLELENGTH%],startH%[]);
+    ArrConst(ParamTable%[1*TABLELENGTH%:TABLELENGTH%],endH%[]);
+    ArrConst(ParamTable%[2*TABLELENGTH%:TABLELENGTH%],startV%[]);
+    ArrConst(ParamTable%[3*TABLELENGTH%:TABLELENGTH%],endV%[]);
+    ArrConst(ParamTable%[4*TABLELENGTH%:TABLELENGTH%],holdtimes%[]);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    ArrConst(ParamTable%[6*TABLELENGTH%:TABLELENGTH%],markers%[]);
+	ArrConst(ParamTable%[7*TABLELENGTH%:TABLELENGTH%],fixtimes%[]);
+    ArrConst(ParamTable%[8*TABLELENGTH%:TABLELENGTH%],chrpos%[]);
+'    ArrConst(ParamTable%[9*TABLELENGTH%:TABLELENGTH%],Hstep%[]);
+'    ArrConst(ParamTable%[10*TABLELENGTH%:TABLELENGTH%],Vstep%[]);
+    ArrConst(ParamTable%[11*TABLELENGTH%:TABLELENGTH%],statfixtimes%[]);
+    ArrConst(ParamTable%[12*TABLELENGTH%:TABLELENGTH%],movfixtimes%[]);
+    
+    
+    'This code overrides the instructions above that fill reward times into ParamTable
+    '    if smrew% <> prdrewtm% then
+    smrew%:=prrewtm%;
+    MakeRandRewArray%(rewardtimes%[],smrew%/SeqStepMS,bgrew%/SeqStepMS,bgrewpcnt%);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    '    endif
+    
+    if BUG% then
+        ClearLog%();
+        for i%:=0 to len(ParamTable%[])-1 do
+            PrintLog("ParamTable %d: %d\n",i%,ParamTable%[i%]);
+            next
+        
+        yield();
+    endif
+    
+    TASK%:=10;
+    oldtTask$:=tTask$;
+    tTask$:="Prediction, "+"Pos="+Str$(prdLzPos)+", Vel="+Str$(prdLzVel) + ", Type="+Str$(prdMODE%);
+    
+    if P1401% then          'If we are sampling
+        Pause%();       'pause task to pass variables to sequencer
+        
+        'Pass everything to sequencer
+        SampleSeqVar(seqRewDly%,rewdlyst%);
+        SampleSeqVar(seqITIA%,ITIst%);					'set ITI variable in sequencer
+        SampleSeqVar(seqITIB%,ITIBst%);					'set 2nd ITI variable in sequencer
+        SampleSeqVar(seqTASK%,TASK%);			'10=prediction
+        SampleSeqVar(seqEYE%,EYE%);         'if eye mode updated by dialog, need to send to sequencer
+        SampleSeqVar(seqTkWinSz%,tkwinbits%);
+        SampleSeqVar(seqFxWinSz%,fxwinbits%);
+        SampleSeqVar(seqDlyst%,purdlyst%);
+        SampleSeqVar(seqHLzvel%,Hlzvelbits%);
+        SampleSeqVar(seqVLzvel%,Vlzvelbits%);
+        SampleSeqVar(seqLZON%,1);
+        
+        
+        if prdeyedelay% > 0 then
+            SampleSeqVar(seqOPTION%,1);
+        else
+            SampleSeqVar(seqOPTION%,0);
+        endif
+        
+        SampleSeqVar(seqIndex%,0);          'Reset table index
+        SampleSeqTable(ParamTable%[]);
+        
+        yield(.1);		'Wait 100 ms to make sure variables received
+        Start%();       'Now start it back up
+    endif
+    
+endif
+return 1;
+end
+
+func SPursuit%()
+
+var ok%;
+var i%:=1;
+var j%:=1;
+var k%,m%;
+
+var mark%:=59;       'Base mark ";" (k is added to it to give all directions)
+
+var holdtmst%;		'Hold time in sequencer steps (counter)
+var ITIst%;			'ITI in sequencer steps
+var ITIBst%;		'2nd ITI in sequencer steps
+var rewdlyst%;		'Reward delay time in sequencer steps
+var rewtmst%;		'Reward time in sequencer steps
+var fixtmst%;	'Fix time in sequencer steps--one for fixation (because decremented in sequencer)
+var purdlyst%;
+
+var tmprandholdtm%[TABLELENGTH%];    'For generating random holdtime to add to base holdtime array
+var randholdtmst%[TABLELENGTH%];		'...in sequencer steps (counter)
+
+var lzposdegs, Hlzposbits%, Vlzposbits%, Hlzoffsetbits%, Vlzoffsetbits%;
+var lzfreqst%;
+var sH%,eH%,sV%,eV%;
+var tkwinbits%,fxwinbits%;
+
+var numpositions%,n%,r%;
+'Arrays used to load paramtable%
+var tmp[TABLELENGTH%];		            'array used for random permutation
+var startH%[TABLELENGTH%];				'starting position of horizontal laser
+var endH%[TABLELENGTH%];				'ending position of horizontal laser
+var startV%[TABLELENGTH%];				'starting position of vertical laser
+var endV%[TABLELENGTH%];				'ending position of vertical laser
+var holdtimes%[TABLELENGTH%];			'fixed or randomized
+var rewardtimes%[TABLELENGTH%];		'fixed or biased
+var markers%[TABLELENGTH%];         'In decimal
+
+'Arrays to determine laser direction
+var Hdirs%[5],Vdirs%[5];
+
+Hdirs%[0]:=0;
+Hdirs%[1]:=-1;
+Hdirs%[2]:=0;
+Hdirs%[3]:=1;
+Hdirs%[4]:=0;
+
+Vdirs%[0]:=1;
+Vdirs%[1]:=0;
+Vdirs%[2]:=0;
+Vdirs%[3]:=0;
+Vdirs%[4]:=-1;
+
+DlgCreate("Sine Pursuit Parameters (RUN will run pursuit task)",0,0,70,24);
+DlgInteger(i%,"ITI and Bad Timeout (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",1,100000,48,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Fix time before pursuit start (ms)",1,100000,33,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Hold time Base and Random (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",0,50000,48,j%); i%+=1; j%+=2;
+DlgInteger(i%,"&Reward Time and Delay (ms)",1,10000,33,j%); i%+=1;
+DlgInteger(i%,"",1,10000,48,j%); i%+=1; j%+=2;
+DlgReal(i%,"Target &distance from center",0.0,30.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Target peak velocity",0.0,100.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Target movement &frequency",0.01,10.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Target eccentric &offset",0.0,30.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Initial window size for fixation",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"&Window size for pursuit",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgInteger(i%,"Delay before EIW check (ms)",1,10000,40,j%); i%+=1; j%+=2;
+DlgList(i%,"Trial ordering","Block|Random",2,15,j%); i%+=1; j%+=1;
+'Circular pursuit not implemented yet
+DlgList(i%,"Pursuit type","Horizontal|Vertical|Circular",2,15,j%); i%+=1; j%+=1;
+DlgList(i%,"Monkey interaction mode","EyeTrial|EyeContinuous",2,25,j%); i%+=1; j%+=2;
+DlgText("Starting positions to use",27,j%); j%+=1;
+DlgCheck(i%,"",35,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",35,j%); j%+=1;
+
+DlgAllow(ALLOWED%,IdleProc%,spCalcVel%);
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"RUN|0x0d");
+DlgButton(2,"Save|0x20");
+ok%:=DlgShow(spITI%,spITIB%,spfixtm%,spholdtm%,sprandholdtm%,sprewtm%,rewdly%,spLzPos,spLzVel,spLzFreq,spLzOffset,spFxwinsz,spTkwinsz,spdelayeiw%,spRAND%,spMODE%,EYE%,spdirs%[]);
+
+if ok%=1 then  'If user selects OK and we are sampling, generate task and send to sequencer
+    
+    if EYE% = 0 then
+        ok%:=Query("Reality Check|Are you SURE you want to use trial mode?","Use trial mode","Use continuous mode");
+        if ok%=0 then
+            EYE%:=1;
+        endif
+    endif
+    
+    
+    if sprewtm% >= 1000 then
+        Message("Reward size of " + Str$(sprewtm%) + " is rather large.  Make sure you didn't accidently type an extra zero.\n" + 
+        "                              NOTE: You'll need to correct the value yourself.");
+    endif
+        
+    'First figure out how many different positions we need to put in table
+    numpositions%:=ArrSum(spdirs%[]);
+    if numpositions% = 0 then Message("You must choose at least one position.\nTask not started!"); return 1; endif
+    n%:=Trunc(TABLELENGTH%/numpositions%);      'Get whole number of times to repeat positions
+    r%:=TABLELENGTH% mod numpositions%;         'Get remaining spaces left in array
+    
+    lzposdegs:=spLzPos;
+    Hlzposbits%:=Round(lzposdegs*BitsPerSineHLzDeg);      '16-bit for cosine output
+    Vlzposbits%:=Round(lzposdegs*BitsPerSineVLzDeg); 
+    Hlzoffsetbits%:=Round(spLzOffset*BitsPerHLzDeg);      '32-bit for DAC
+    Vlzoffsetbits%:=Round(spLzOffset*BitsPerVLzDeg); 
+    ''''''''NEED TO DO ERROR CHECKING TO MAKE SURE WE DON'T GO OUT OF RANGE OF LASERS'''''''''
+    
+    ''''''''Calculate frequency here based on steps per ms''''''''
+    lzfreqst%:=spLzFreq*pow(2,32)*SeqStepMS/1000;	'degrees per step (divide by 1000 b/c need units in Hz)
+    
+    sH%:=Hlzoffsetbits%;
+    eH%:=Hlzposbits%;
+    sV%:=Vlzoffsetbits%;
+    eV%:=Vlzposbits%;
+    
+    docase
+    case spMODE%=0 then   'doing horizontal
+        eV%:=0;         'Set vertical sine displacement to zero    
+    case spMODE%=1 then   'doing vertical
+        eH%:=0;         'Set horizontal sine displacement to zero    
+    case spMODE%=2 then   'doing circular
+        sH%:=0;         'circles are centered on zero
+        sV%:=0;
+    endcase
+    
+    rewdlyst%:=rewdly%/SeqStepMS;					'Convert time in ms to sequencer steps
+    rewtmst%:=sprewtm%/SeqStepMS;					'Convert time in ms to sequencer steps  
+    'Add variable for fix time to dialog
+    fixtmst%:=spfixtm%/SeqStepMS/StepsPerEIWLoop;					'Divide by StepsPerEIWLoop because StepsPerEIWLoop steps occupy one loop    
+    holdtmst%:=spholdtm%/SeqStepMS/StepsPerEIWLoop;			'Divide by 25 because 25 steps occupy one loop
+    purdlyst%:=spdelayeiw%/SeqStepMS/StepsPerEIWLoop;
+    
+    ITIst%:=spITI%/SeqStepMS;							'Convert time in ms to sequencer steps
+    ITIBst%:=spITIB%/SeqStepMS;							'Convert time in ms to sequencer steps
+    
+    tkwinsz:=spTkwinsz;                      'Set globally
+    tkwinbits%:=6553.6*(tkwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    fxwinsz:=spFxwinsz;                      'Set globally
+    fxwinbits%:=6553.6*(fxwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    
+    Rand(tmprandholdtm%[],sprandholdtm%);
+    ArrConst(randholdtmst%[],tmprandholdtm%[]);
+    ArrDiv(randholdtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randholdtmst%[],StepsPerEIWLoop);
+    
+    'Now loop through for each position and assign values to table
+    m%:=0;
+    for k%:=0 to Len(spdirs%[])-1 do
+        if spdirs%[k%] = 1 then
+            fillarray%(startH%[],Hdirs%[k%]*sH%,m%*n%,m%*n%+n%-1);
+            fillarray%(endH%[],eH%,m%*n%,m%*n%+n%-1);
+            fillarray%(startV%[],Vdirs%[k%]*sV%,m%*n%,m%*n%+n%-1);
+            fillarray%(endV%[],eV%,m%*n%,m%*n%+n%-1);
+            fillarray%(holdtimes%[],holdtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(rewardtimes%[],rewtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(markers%[],mark%+k%,m%*n%,m%*n%+n%-1);
+            
+            m%+=1;       'Advance counter to fill next group of values            
+        endif
+    next
+    
+    'Fill in remaining spaces of array (just use last r% values, since r% will be pretty small)
+    if r%>0 then
+        for k%:=1 to r% do    
+            startH%[TABLELENGTH%-k%]:=startH%[TABLELENGTH%-r%-k%];
+            endH%[TABLELENGTH%-k%]:=endH%[TABLELENGTH%-r%-k%];
+            startV%[TABLELENGTH%-k%]:=startV%[TABLELENGTH%-r%-k%];
+            endV%[TABLELENGTH%-k%]:=endV%[TABLELENGTH%-r%-k%];
+            holdtimes%[TABLELENGTH%-k%]:=holdtimes%[TABLELENGTH%-r%-k%];
+            rewardtimes%[TABLELENGTH%-k%]:=rewardtimes%[TABLELENGTH%-r%-k%];
+            markers%[TABLELENGTH%-k%]:=markers%[TABLELENGTH%-r%-k%];
+        next
+    endif
+    
+    'Add random times to base hold times
+    ArrAdd(holdtimes%[],randholdtmst%[]);
+    
+    if spRAND% = 1 then
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[]);
+        'Do it again
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[]);
+    endif
+    
+    'if REWRAND% = 1 then
+    '    Rand(rewardtimes%[],rewtmst%-(25/SeqStepMS),25/SeqStepMS);     'Generate random array between 25 msec and rewtm msec
+    'endif
+    
+    'Generate Paramtable
+    ArrConst(ParamTable%[0*TABLELENGTH%:TABLELENGTH%],startH%[]);
+    ArrConst(ParamTable%[1*TABLELENGTH%:TABLELENGTH%],endH%[]);
+    ArrConst(ParamTable%[2*TABLELENGTH%:TABLELENGTH%],startV%[]);
+    ArrConst(ParamTable%[3*TABLELENGTH%:TABLELENGTH%],endV%[]);
+    ArrConst(ParamTable%[4*TABLELENGTH%:TABLELENGTH%],holdtimes%[]);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    ArrConst(ParamTable%[6*TABLELENGTH%:TABLELENGTH%],markers%[]);
+	ArrConst(ParamTable%[7*TABLELENGTH%:TABLELENGTH%],fixtmst%);    'Use scalar, since we don't need to randomize fix time
+    
+    'This code overrides the instructions above that fill reward times into ParamTable
+    smrew%:=sprewtm%;
+    MakeRandRewArray%(rewardtimes%[],smrew%/SeqStepMS,bgrew%/SeqStepMS,bgrewpcnt%);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    
+    if BUG% then
+        ClearLog%();
+        for i%:=0 to len(ParamTable%[])-1 do
+            PrintLog("ParamTable %d: %d\n",i%,ParamTable%[i%]);
+        next
+        
+        yield();
+    endif
+    
+    TASK%:=4;
+    oldtTask$:=tTask$;
+    tTask$:="Sine Pursuit, "+"Pos="+Str$(spLzPos)+", Freq="+Str$(spLzFreq)+", Offset=" +Str$(spLzOffset)+", Type="+Str$(spMODE%);
+    
+    if P1401% then          'If we are sampling
+        Pause%();       'pause task to pass variables to sequencer
+       
+        yield(0.1);
+        'Pass everything to sequencer
+        SampleSeqVar(seqRewDly%,rewdlyst%);
+        SampleSeqVar(seqITIA%,ITIst%);					'set ITI variable in sequencer
+        SampleSeqVar(seqITIB%,ITIBst%);					'set 2nd ITI variable in sequencer
+        SampleSeqVar(seqTASK%,TASK%);			'4=sine pursuit
+        SampleSeqVar(seqEYE%,EYE%);         'if eye mode updated by dialog, need to send to sequencer
+        SampleSeqVar(seqTkWinSz%,tkwinbits%);
+        SampleSeqVar(seqFxWinSz%,fxwinbits%);
+        SampleSeqVar(seqDlyst%,purdlyst%);
+        SampleSeqVar(seqFreq%,lzfreqst%);
+        SampleSeqVar(seqLZON%,1);
+        
+        SampleSeqVar(seqIndex%,0);          'Reset table index
+        SampleSeqTable(ParamTable%[]);
+        
+        yield(0.1);		'Wait 100 ms to make sure variables received
+        Start%();       'Now start it back up
+    endif
+    
+endif
+
+return 1;
+end
+
+func SVOR%()
+
+const CHRPEAKVOLTS:=1.071;      'Use 1.071 V amplitude sinusoid for position command; GEARI scales up
+'Was 1.029 prior to 11/18/2010
+'1V = 204.8 encoder counts; 65536 encoder counts = 360 degrees, hence 1 V = 1.125 degrees and 1 degree = 889 mV
+
+var ok%;
+var i%:=1;
+var j%:=1;
+var k%,m%;
+
+var mark%:=69;       'Base mark (k is added to it to give all directions)
+
+var holdtmst%;		'Hold time in sequencer steps (counter)
+var ITIst%;			'ITI in sequencer steps
+var ITIBst%;		'2nd ITI in sequencer steps
+var rewdlyst%;		'Reward delay time in sequencer steps
+var rewtmst%;		'Reward time in sequencer steps
+var fixtmst%;	    'Fix time in sequencer steps--one for fixation (because decremented in sequencer)
+var purdlyst%;
+
+var tmprandholdtm%[TABLELENGTH%];    'For generating random holdtime to add to base holdtime array
+var randholdtmst%[TABLELENGTH%];		'...in sequencer steps (counter)
+
+var Hlzposbits%, Vlzposbits%;
+var sH%,eH%,sV%,eV%;
+var tkwinbits%,fxwinbits%;
+
+var chrvelbits%;
+var chrposbits%;    ' chrposbits is constant, corresponding to full amplitude sine wave
+var chrfreqst%;
+var chrgeari%:=1;       'Ratio of geari/gearo determines gain of ANIN for position command
+var chrgearo%:=1;
+
+var initst$, cinitst$, dinitst$;       'Strings to send to kollmorgen controller
+var cenablest$,denablest$;              'Strings to enable/disable chair and drum
+
+var numpositions%,n%,r%;
+'Arrays used to load paramtable%
+var tmp[TABLELENGTH%];		            'array used for random permutation
+var startH%[TABLELENGTH%];				'starting position of horizontal laser
+var endH%[TABLELENGTH%];				'ending position of horizontal laser
+var startV%[TABLELENGTH%];				'starting position of vertical laser
+var endV%[TABLELENGTH%];				'ending position of vertical laser
+var holdtimes%[TABLELENGTH%];			'fixed or randomized
+var rewardtimes%[TABLELENGTH%];		'fixed or biased
+var markers%[TABLELENGTH%];         'In decimal
+'New in version 7.3
+var chrpos%[TABLELENGTH%];          'Position displacement of chair
+
+'Arrays to determine laser direction
+var Hdirs%[5],Vdirs%[5];
+
+Hdirs%[0]:=0;
+Hdirs%[1]:=-1;
+Hdirs%[2]:=0;
+Hdirs%[3]:=1;
+Hdirs%[4]:=0;
+
+Vdirs%[0]:=1;
+Vdirs%[1]:=0;
+Vdirs%[2]:=0;
+Vdirs%[3]:=0;
+Vdirs%[4]:=-1;
+
+DlgCreate("Sine VOR Parameters (RUN will run task)",0,0,70,24);
+DlgInteger(i%,"ITI and Bad Timeout (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",1,100000,48,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Fix time before VORC starts (ms)",1,100000,33,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Hold time Base and Random (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",0,50000,48,j%); i%+=1; j%+=2;
+DlgInteger(i%,"&Reward Time and Delay (ms)",1,10000,33,j%); i%+=1;
+DlgInteger(i%,"",1,10000,48,j%); i%+=1; j%+=2;
+DlgInteger(i%,"Chair &distance from center",1,90,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Chair peak velocity",0.0,100.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Chair movement &frequency",0.01,10.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Target eccentric &offset",0.0,30.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Initial window size for fixation",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"&Window size for cancellation",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgInteger(i%,"Delay before EIW check (ms)",1,10000,40,j%); i%+=1; j%+=2;
+DlgList(i%,"Trial ordering","Block|Random",2,15,j%); i%+=1; j%+=1;
+DlgList(i%,"Monkey interaction mode","EyeTrial|EyeContinuous",2,25,j%); i%+=1; j%+=1;
+DlgList(i%,"VOR condition","Laseronly|OKSlaser|VORD",3,25,j%); i%+=1;j%+=2;
+DlgText("Fixation positions to use",27,j%); j%+=1;
+DlgCheck(i%,"",35,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",35,j%); j%+=1;
+
+DlgAllow(ALLOWED%,IdleProc%,scCalcVel%);
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"RUN|0x0d");
+DlgButton(2,"Save|0x20");
+ok%:=DlgShow(svITI%,svITIB%,svfixtm%,svholdtm%,svrandholdtm%,svrewtm%,rewdly%,svChrPos%,svChrVel,svChrFreq,svLzOffset,svFxwinsz,svTkwinsz,svdelayeiw%,svRAND%,EYE%,svCOND%,svdirs%[]);
+
+if ok%=1 then  'If user selects OK and we are sampling, generate task and send to sequencer
+    
+    if EYE% = 0 then
+        ok%:=Query("Reality Check|Are you SURE you want to use trial mode?","Use trial mode","Use continuous mode");
+        if ok%=0 then
+            EYE%:=1;
+        endif
+    endif
+    
+    if svrewtm% >= 1000 then
+        Message("Reward size of " + Str$(svrewtm%) + " is rather large.  Make sure you didn't accidently type an extra zero.\n" + 
+        "                              NOTE: You'll need to correct the value yourself.");
+    endif
+        
+    'Check if serial port open to kollmorgen and if not try to open
+    if not serialOpen% then SerOpen%(); endif
+    
+    'First figure out how many different positions we need to put in table
+    numpositions%:=ArrSum(svdirs%[]);
+    if numpositions% = 0 then Message("You must choose at least one position.\nTask not started!"); return 1; endif
+    n%:=Trunc(TABLELENGTH%/numpositions%);      'Get whole number of times to repeat positions
+    r%:=TABLELENGTH% mod numpositions%;         'Get remaining spaces left in array
+    
+    Hlzposbits%:=Round(svLzOffset*BitsPerHLzDeg);      '32-bit for DAC
+    Vlzposbits%:=Round(svLzOffset*BitsPerVLzDeg);
+    ''''''''NEED TO DO ERROR CHECKING TO MAKE SURE WE DON'T GO OUT OF RANGE OF LASERS'''''''''
+    
+    ''''''''Calculate frequency here based on steps per ms''''''''
+    chrfreqst%:=svChrFreq*pow(2,32)*SeqStepMS/1000;	'degrees per step (divide by 1000 b/c need units in Hz)
+    chrposbits%:=Round(CHRPEAKVOLTS*SEQBITSPERVOLT); 'output is 1 degree with GEARI=1
+    
+    chrvelbits%:=Round((chrposbits%*65536)/(500/SeqStepMS)); 'Reach peak position in 500 ms
+    
+    chrgeari%:=svChrPos%*27;
+    
+    initst$:=Print$("\\*\rDIS\rOPMODE h%.2x\rUNITS h%.2x\rPCMDMODE h%.2x\r",8,0,1);  '35 chars
+	cinitst$:=Print$("\\1\rBW h%.2x\rTF h%.2x\rACC h%.2x\rDEC h%.2x\r",12,100,67,67);  '~30 chars
+    dinitst$:=Print$("\\2\rBW h%.2x\rTF h%.2x\rACC h%.2x\rDEC h%.2x\r",12,75,67,67);	'~30 chars
+    
+    cenablest$:="\\1\rEN\r";	'Enable chair
+	denablest$:="\\2\rDIS\r"; 	'Disable drum (just in case!!!)
+'    if svCOND%=1 then 'Use drum (OKS + laser)
+'        denablest$:="\\2\rEN\r";
+'    endif
+    
+    yield();
+        
+    sH%:=Hlzposbits%;
+    eH%:=Hlzposbits%;
+    sV%:=Vlzposbits%;
+    eV%:=Vlzposbits%;
+    
+    rewdlyst%:=rewdly%/SeqStepMS;					'Convert time in ms to sequencer steps
+    rewtmst%:=svrewtm%/SeqStepMS;					'Convert time in ms to sequencer steps  
+    fixtmst%:=svfixtm%/SeqStepMS/StepsPerEIWLoop;					'Divide by StepsPerEIWLoop because StepsPerEIWLoop steps occupy one loop    
+    holdtmst%:=svholdtm%/SeqStepMS/StepsPerEIWLoop;			'Divide by StepsPerEIWLoop because StepsPerEIWLoop steps occupy one loop
+    purdlyst%:=svdelayeiw%/SeqStepMS/StepsPerEIWLoop;
+    
+    ITIst%:=svITI%/SeqStepMS;							'Convert time in ms to sequencer steps
+    ITIBst%:=svITIB%/SeqStepMS;							'Convert time in ms to sequencer steps
+    
+    tkwinsz:=svTkwinsz;                      'Set globally
+    tkwinbits%:=6553.6*(tkwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    fxwinsz:=svFxwinsz;                      'Set globally
+    fxwinbits%:=6553.6*(fxwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    
+    Rand(tmprandholdtm%[],svrandholdtm%);
+    ArrConst(randholdtmst%[],tmprandholdtm%[]);
+    ArrDiv(randholdtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randholdtmst%[],StepsPerEIWLoop);
+    
+    'Now loop through for each position and assign values to table
+    m%:=0;
+    for k%:=0 to Len(svdirs%[])-1 do
+        if svdirs%[k%] = 1 then
+            fillarray%(startH%[],Hdirs%[k%]*sH%,m%*n%,m%*n%+n%-1);
+            fillarray%(endH%[],Hdirs%[k%]*eH%,m%*n%,m%*n%+n%-1);
+            fillarray%(startV%[],Vdirs%[k%]*sV%,m%*n%,m%*n%+n%-1);
+            fillarray%(endV%[],Vdirs%[k%]*eV%,m%*n%,m%*n%+n%-1);
+            fillarray%(holdtimes%[],holdtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(rewardtimes%[],rewtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(markers%[],mark%+k%,m%*n%,m%*n%+n%-1);
+            fillarray%(chrpos%[],chrposbits%,m%*n%,m%*n%+n%-1);       'Output full +/-5V for sine
+            
+            m%+=1;       'Advance counter to fill next group of values            
+        endif
+    next
+    
+    'Fill in remaining spaces of array (just use last r% values, since r% will be pretty small)
+    if r%>0 then
+        for k%:=1 to r% do    
+            startH%[TABLELENGTH%-k%]:=startH%[TABLELENGTH%-r%-k%];
+            endH%[TABLELENGTH%-k%]:=endH%[TABLELENGTH%-r%-k%];
+            startV%[TABLELENGTH%-k%]:=startV%[TABLELENGTH%-r%-k%];
+            endV%[TABLELENGTH%-k%]:=endV%[TABLELENGTH%-r%-k%];
+            holdtimes%[TABLELENGTH%-k%]:=holdtimes%[TABLELENGTH%-r%-k%];
+            rewardtimes%[TABLELENGTH%-k%]:=rewardtimes%[TABLELENGTH%-r%-k%];
+            markers%[TABLELENGTH%-k%]:=markers%[TABLELENGTH%-r%-k%];
+            chrpos%[TABLELENGTH%-k%]:=chrpos%[TABLELENGTH%-r%-k%];
+        next
+    endif
+    
+    'Add random times to base hold times
+    ArrAdd(holdtimes%[],randholdtmst%[]);
+    
+    if svRAND% = 1 then
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[],chrpos%[]);
+        'Do it again
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[],chrpos%[]);
+    endif
+    
+'    if REWRAND% = 1 then
+'        Rand(rewardtimes%[],rewtmst%-(25/SeqStepMS),25/SeqStepMS);     'Generate random array between 25 msec and rewtm msec
+'    endif
+    
+    'Generate Paramtable
+    ArrConst(ParamTable%[0*TABLELENGTH%:TABLELENGTH%],startH%[]);
+    ArrConst(ParamTable%[1*TABLELENGTH%:TABLELENGTH%],endH%[]);
+    ArrConst(ParamTable%[2*TABLELENGTH%:TABLELENGTH%],startV%[]);
+    ArrConst(ParamTable%[3*TABLELENGTH%:TABLELENGTH%],endV%[]);
+    ArrConst(ParamTable%[4*TABLELENGTH%:TABLELENGTH%],holdtimes%[]);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    ArrConst(ParamTable%[6*TABLELENGTH%:TABLELENGTH%],markers%[]);
+	ArrConst(ParamTable%[7*TABLELENGTH%:TABLELENGTH%],fixtmst%);    'Use scalar, since we don't need to randomize fix time
+    ArrConst(ParamTable%[8*TABLELENGTH%:TABLELENGTH%],chrpos%[]);
+    
+    'This code overrides the instructions above that fill reward times into ParamTable
+    smrew%:=svrewtm%;
+    MakeRandRewArray%(rewardtimes%[],smrew%/SeqStepMS,bgrew%/SeqStepMS,bgrewpcnt%);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    
+    if BUG% then
+        ClearLog%();
+        for i%:=0 to len(ParamTable%[])-1 do
+            PrintLog("ParamTable %d: %d\n",i%,ParamTable%[i%]);
+        next
+        
+        yield();
+    endif
+    
+    TASK%:=7;
+    oldtTask$:=tTask$;
+    tTask$:="Sine VORL, "+"Pos="+Str$(svChrPos%)+", Freq="+Str$(svChrFreq)+", Offset=" +Str$(svLzOffset)+", Type="+Str$(svCOND%);
+    
+    if svCOND%=2 then   'VORd
+        TASK%:=8;
+        tTask$:="Sine VORD, "+"Pos="+Str$(svChrPos%)+", Freq="+Str$(svChrFreq)+", Offset=" +Str$(svLzOffset)+", Type="+Str$(svCOND%);
+    endif
+    
+    if P1401% and serialOpen% then          'If we are sampling and talking to kollmorgen controller
+        Pause%();       'pause task to pass variables to sequencer
+ 
+        'Pass everything to sequencer
+        SampleSeqVar(seqRewDly%,rewdlyst%);
+        SampleSeqVar(seqITIA%,ITIst%);					'set ITI variable in sequencer
+        SampleSeqVar(seqITIB%,ITIBst%);					'set 2nd ITI variable in sequencer
+        SampleSeqVar(seqTASK%,TASK%);			'4=sine cancel, 7=VORd
+        
+        if svCOND%=1 then
+            SampleSeqVar(seqOKSLTON%,1);
+        else
+            SampleSeqVar(seqOKSLTON%,0);
+        endif
+        
+        SampleSeqVar(seqLZON%,1);
+        
+        SampleSeqVar(seqEYE%,EYE%);         'if eye mode updated by dialog, need to send to sequencer
+        SampleSeqVar(seqTkWinSz%,tkwinbits%);
+        SampleSeqVar(seqFxWinSz%,fxwinbits%);
+        SampleSeqVar(seqDlyst%,purdlyst%);
+        SampleSeqVar(seqFreq%,chrfreqst%);
+        SampleSeqVar(seqChrvel%,chrvelbits%);
+        
+        SampleSeqVar(seqIndex%,0);          'Reset table index
+        SampleSeqTable(ParamTable%[]);
+        
+        'Wait to make sure motors are stopped before talking to motor controllers
+        var chrpos1,chrpos2,drmpos1,drmpos2;
+        
+        repeat
+            view(vh%);        
+            'Get value of chair and drum channels now
+            chrpos1:=ChanValue(CHRCHAN%,MaxTime(CHRCHAN%));
+            drmpos1:=ChanValue(DRMCHAN%,MaxTime(DRMCHAN%));
+            yield(0.5); 'Wait a half second
+            'Get new values of chair and drum channels
+            chrpos2:=ChanValue(CHRCHAN%,MaxTime(CHRCHAN%));
+            drmpos2:=ChanValue(DRMCHAN%,MaxTime(DRMCHAN%));
+        until (abs(chrpos2-chrpos1) < 0.5) AND (abs(drmpos2-drmpos1) < 0.5);    'loop until drum and chair haven't moved more than half a degree in half a second
+        
+        
+        'Send commands to kollmorgen contollers
+        SerialWrite(KMGNSERIALPORT%,initst$);
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,cinitst$);
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,dinitst$);		
+        yield(0.1);
+        
+        SerialWrite(KMGNSERIALPORT%,"\\1\rGEARI " + str$(chrgeari%) + "\r");		
+		yield(0.1);
+		SerialWrite(KMGNSERIALPORT%,"\\1\rGEARO " + str$(chrgearo%) + "\r");
+		yield(0.1);
+        
+        'Use same gear ratios for chair and drum
+        SerialWrite(KMGNSERIALPORT%,"\\2\rGEARI " + str$(chrgeari%) + "\r");	
+		yield(0.1);
+		SerialWrite(KMGNSERIALPORT%,"\\2\rGEARO " + str$(chrgearo%) + "\r");
+		yield(0.1);
+        
+    
+        SerialWrite(KMGNSERIALPORT%,"\\2\rOPMODE 8\r");
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,"\\2\rGEAR 0\r");
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,"\\2\rDIR 1 0 0\r");  
+        yield(0.1);
+      
+        
+        SerialWrite(KMGNSERIALPORT%,cenablest$);        'endable chair
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,denablest$);        'disable drum
+        yield(0.1);
+        
+        yield(0.1);		'Wait 100 ms to make sure variables received
+        Start%();       'Now start it back up
+    endif
+    
+endif
+
+return 1;
+end
+
+func spCalcVel%(item%)      'For calculating velocity in pursuit menu
+var oldpos,freq;
+var newvel;
+
+if item%=8 or 10 then
+    oldpos:=DlgValue(8);
+    freq:=DlgValue(10);
+    newvel:=freq*2*PI*oldpos;
+    DlgValue(9,newvel);
+endif
+return 1;
+end
+
+func scCalcVel%(item%)      'For calculating velocity in cancellation menu
+var oldpos,freq;
+var newvel;
+
+if item%=8 or 10 then
+    oldpos:=DlgValue(8);
+    freq:=DlgValue(10);
+    newvel:=freq*2*PI*oldpos;
+    DlgValue(9,newvel);
+endif
+return 1;
+end
+
+func fTogglePos%(item%)      'For toggling ON or OFF all fixation points
+var i%;
+
+if item%=fCheckItemToggle% then
+    if DlgValue(fCheckItemEnd%)=1 then    'Already checked, now uncheck all but center
+        for i%:=fCheckItemStart% to fCheckItemEnd% do
+            DlgValue(i%,0);
+        next  
+        'Now recheck center position
+        DlgValue(fCheckItemStart%+(fCheckItemEnd%-fCheckItemStart%)/2,1);             
+    else                                'Not checked so check all positions
+        for i%:=fCheckItemStart% to fCheckItemEnd% do
+            DlgValue(i%,1);
+        next
+    endif
+    DlgValue(fCheckItemToggle%,0);
+    
+endif
+return 1;
+end
+
+func SCancel%()
+
+const CHRPEAKVOLTS:=1.071;      'Use 1.071 V amplitude sinusoid for position command; GEARI scales up
+'Was 1.029 prior to 11/18/2010
+'1V = 204.8 encoder counts; 65535 encoder counts = 360 degrees, hence 1 V = 1.125 degrees and 1 degree = 889 mV
+
+var ok%;
+var i%:=1;
+var j%:=1;
+var k%,m%;
+
+var mark%:=64;       'Base mark (k is added to it to give all directions)
+
+var holdtmst%;		'Hold time in sequencer steps (counter)
+var ITIst%;			'ITI in sequencer steps
+var ITIBst%;		'2nd ITI in sequencer steps
+var rewdlyst%;		'Reward delay time in sequencer steps
+var rewtmst%;		'Reward time in sequencer steps
+var fixtmst%;	'Fix time in sequencer steps--one for fixation (because decremented in sequencer)
+var purdlyst%;
+
+var tmprandholdtm%[TABLELENGTH%];    'For generating random holdtime to add to base holdtime array
+var randholdtmst%[TABLELENGTH%];		'...in sequencer steps (counter)
+
+var chrvelbits%;
+var Hlzposbits%, Vlzposbits%;
+var lzposdegs;
+var Hlzvelbits%;
+var Vlzvelbits%;
+var Hlzoffsetbits%, Vlzoffsetbits%;
+var sH%,eH%,sV%,eV%;
+var tkwinbits%,fxwinbits%;
+
+var chrposbits%;    ' chrposbits is constant, corresponding to full amplitude sine wave
+var chrfreqst%;
+var chrgeari%:=1;       'Ratio of geari/gearo determines gain of ANIN for position command
+var chrgearo%:=1;
+
+var initst$, cinitst$, dinitst$;       'Strings to send to kollmorgen controller
+var cenablest$,denablest$;              'Strings to enable/disable chair and drum
+
+var numpositions%,n%,r%;
+'Arrays used to load paramtable%
+var tmp[TABLELENGTH%];		            'array used for random permutation
+var startH%[TABLELENGTH%];				'starting position of horizontal laser
+var endH%[TABLELENGTH%];				'ending position of horizontal laser
+var startV%[TABLELENGTH%];				'starting position of vertical laser
+var endV%[TABLELENGTH%];				'ending position of vertical laser
+var holdtimes%[TABLELENGTH%];			'fixed or randomized
+var rewardtimes%[TABLELENGTH%];		'fixed or biased
+var markers%[TABLELENGTH%];         'In decimal
+'New in version 7.3
+var chrpos%[TABLELENGTH%];          'Position displacement of chair
+
+'Arrays to determine laser direction
+var Hdirs%[5],Vdirs%[5];
+
+Hdirs%[0]:=0;
+Hdirs%[1]:=-1;
+Hdirs%[2]:=0;
+Hdirs%[3]:=1;
+Hdirs%[4]:=0;
+
+Vdirs%[0]:=1;
+Vdirs%[1]:=0;
+Vdirs%[2]:=0;
+Vdirs%[3]:=0;
+Vdirs%[4]:=-1;
+
+DlgCreate("Sine VORC Parameters (RUN will run task)",0,0,70,25);
+DlgInteger(i%,"ITI and Bad Timeout (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",1,100000,48,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Fix time before VOR starts (ms)",1,100000,33,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Hold time Base and Random (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",0,50000,48,j%); i%+=1; j%+=2;
+DlgInteger(i%,"&Reward Time and Delay (ms)",1,10000,33,j%); i%+=1;
+DlgInteger(i%,"",1,10000,48,j%); i%+=1; j%+=2;
+DlgInteger(i%,"Chair &distance from center",1,90,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Chair peak velocity",0.0,100.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Chair movement &frequency",0.01,10.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Target eccentric &offset",0.0,30.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Initial window size for fixation",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"&Window size for VOR",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgInteger(i%,"Delay before EIW check (ms)",1,10000,40,j%); i%+=1; j%+=2;
+DlgList(i%,"Trial ordering","Block|Random",2,15,j%); i%+=1; j%+=1;
+DlgList(i%,"Monkey interaction mode","EyeTrial|EyeContinuous",2,25,j%); i%+=1; j%+=1;
+DlgList(i%,"VORC condition","Laseronly|OKSlaser",2,25,j%); i%+=1;j%+=1;
+DlgReal(i%,"Laser correction (deg)",-10,10,33,j%); i%+=1; j%+=2;
+DlgText("Fixation positions to use",27,j%); j%+=1;
+DlgCheck(i%,"",35,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",35,j%); j%+=1;
+
+DlgAllow(ALLOWED%,IdleProc%,scCalcVel%);
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"RUN|0x0d");
+DlgButton(2,"Save|0x20");
+ok%:=DlgShow(scITI%,scITIB%,scfixtm%,scholdtm%,scrandholdtm%,screwtm%,rewdly%,scChrPos%,scChrVel,scChrFreq,scLzOffset,scFxwinsz,scTkwinsz,scdelayeiw%,scRAND%,EYE%,scCOND%,scLzCorrection,scdirs%[]);
+
+if ok%=1 then  'If user selects OK and we are sampling, generate task and send to sequencer
+    
+    if EYE% = 0 then
+        ok%:=Query("Reality Check|Are you SURE you want to use trial mode?","Use trial mode","Use continuous mode");
+        if ok%=0 then
+            EYE%:=1;
+        endif
+    endif
+    
+    if screwtm% >= 1000 then
+        Message("Reward size of " + Str$(screwtm%) + " is rather large.  Make sure you didn't accidently type an extra zero.\n" + 
+        "                              NOTE: You'll need to correct the value yourself.");
+    endif
+        
+    'Check if serial port open to kollmorgen and if not try to open
+    if not serialOpen% then SerOpen%(); endif
+    
+    'First figure out how many different positions we need to put in table
+    numpositions%:=ArrSum(scdirs%[]);
+    if numpositions% = 0 then Message("You must choose at least one position.\nTask not started!"); return 1; endif
+    n%:=Trunc(TABLELENGTH%/numpositions%);      'Get whole number of times to repeat positions
+    r%:=TABLELENGTH% mod numpositions%;         'Get remaining spaces left in array
+    
+    ''''''''Calculate frequency here based on steps per ms''''''''
+    chrfreqst%:=scChrFreq*pow(2,32)*SeqStepMS/1000;	'degrees per step (divide by 1000 b/c need units in Hz)
+    chrposbits%:=Round(CHRPEAKVOLTS*SEQBITSPERVOLT); 'output is 1 degree with GEARI=1
+    
+    chrgeari%:=scChrPos%*27;
+    
+    initst$:=Print$("\\*\rDIS\rOPMODE h%.2x\rUNITS h%.2x\rPCMDMODE h%.2x\r",8,0,1);  '35 chars
+	cinitst$:=Print$("\\1\rBW h%.2x\rTF h%.2x\rACC h%.2x\rDEC h%.2x\r",12,100,67,67);  '~30 chars
+    dinitst$:=Print$("\\2\rBW h%.2x\rTF h%.2x\rACC h%.2x\rDEC h%.2x\r",12,75,67,67);	'~30 chars
+    
+    cenablest$:="\\1\rEN\r";	'Enable chair
+	denablest$:="\\2\rDIS\r"; 	'Disable drum (just in case!!!)
+    if scCOND%=1 then 'Use drum (OKS + laser)
+        denablest$:="\\2\rEN\r";
+    endif
+    
+    yield();
+    
+    lzposdegs:=scChrPos%+scLzCorrection;
+    Hlzposbits%:=Round(lzposdegs*BitsPerSineHLzDeg);      '16-bit for cosine output
+    Vlzposbits%:=Round(lzposdegs*BitsPerSineVLzDeg);
+    Hlzoffsetbits%:=Round(scLzOffset*BitsPerHLzDeg);      '32-bit for DAC
+    Vlzoffsetbits%:=Round(scLzOffset*BitsPerVLzDeg); 
+    ''''''''NEED TO DO ERROR CHECKING TO MAKE SURE WE DON'T GO OUT OF RANGE OF LASERS'''''''''
+    
+    sH%:=Hlzoffsetbits%;
+    eH%:=Hlzposbits%;
+    sV%:=Vlzoffsetbits%;
+    eV%:=0;
+    ''''''''NEED TO DO ERROR CHECKING TO MAKE SURE WE DON'T GO OUT OF RANGE OF LASERS'''''''''
+    
+    chrvelbits%:=Round((chrposbits%*65536)/(500/SeqStepMS)); 'Reach peak position in 500 ms
+    Hlzvelbits%:=Round((Hlzposbits%*65536)/(500/SeqStepMS));  'Ditto
+    Vlzvelbits%:=Round((Vlzposbits%*65536)/(500/SeqStepMS)); 
+    
+    rewdlyst%:=rewdly%/SeqStepMS;					'Convert time in ms to sequencer steps
+    rewtmst%:=screwtm%/SeqStepMS;					'Convert time in ms to sequencer steps  
+    fixtmst%:=scfixtm%/SeqStepMS/StepsPerEIWLoop;					'Divide by StepsPerEIWLoop because StepsPerEIWLoop steps occupy one loop    
+    holdtmst%:=scholdtm%/SeqStepMS/StepsPerEIWLoop;			'Divide by StepsPerEIWLoop because StepsPerEIWLoop steps occupy one loop
+    purdlyst%:=scdelayeiw%/SeqStepMS/StepsPerEIWLoop;
+    
+    ITIst%:=scITI%/SeqStepMS;							'Convert time in ms to sequencer steps
+    ITIBst%:=scITIB%/SeqStepMS;							'Convert time in ms to sequencer steps
+    
+    tkwinsz:=scTkwinsz;                      'Set globally
+    tkwinbits%:=6553.6*(tkwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    fxwinsz:=scFxwinsz;                      'Set globally
+    fxwinbits%:=6553.6*(fxwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    
+    Rand(tmprandholdtm%[],scrandholdtm%);
+    ArrConst(randholdtmst%[],tmprandholdtm%[]);
+    ArrDiv(randholdtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randholdtmst%[],StepsPerEIWLoop);
+    
+    'Now loop through for each position and assign values to table
+    m%:=0;
+    for k%:=0 to Len(scdirs%[])-1 do
+        if scdirs%[k%] = 1 then
+            fillarray%(startH%[],Hdirs%[k%]*sH%,m%*n%,m%*n%+n%-1);
+            fillarray%(endH%[],eH%,m%*n%,m%*n%+n%-1);
+            fillarray%(startV%[],Vdirs%[k%]*sV%,m%*n%,m%*n%+n%-1);
+            fillarray%(endV%[],eV%,m%*n%,m%*n%+n%-1);
+            fillarray%(holdtimes%[],holdtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(rewardtimes%[],rewtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(markers%[],mark%+k%,m%*n%,m%*n%+n%-1);
+            fillarray%(chrpos%[],chrposbits%,m%*n%,m%*n%+n%-1);       'Output full +/-5V for sine
+            
+            m%+=1;       'Advance counter to fill next group of values            
+        endif
+    next
+    
+    'Fill in remaining spaces of array (just use last r% values, since r% will be pretty small)
+    if r%>0 then
+        for k%:=1 to r% do    
+            startH%[TABLELENGTH%-k%]:=startH%[TABLELENGTH%-r%-k%];
+            endH%[TABLELENGTH%-k%]:=endH%[TABLELENGTH%-r%-k%];
+            startV%[TABLELENGTH%-k%]:=startV%[TABLELENGTH%-r%-k%];
+            endV%[TABLELENGTH%-k%]:=endV%[TABLELENGTH%-r%-k%];
+            holdtimes%[TABLELENGTH%-k%]:=holdtimes%[TABLELENGTH%-r%-k%];
+            rewardtimes%[TABLELENGTH%-k%]:=rewardtimes%[TABLELENGTH%-r%-k%];
+            markers%[TABLELENGTH%-k%]:=markers%[TABLELENGTH%-r%-k%];
+            chrpos%[TABLELENGTH%-k%]:=chrpos%[TABLELENGTH%-r%-k%];
+        next
+    endif
+    
+    'Add random times to base hold times
+    ArrAdd(holdtimes%[],randholdtmst%[]);
+    
+    if scRAND% = 1 then
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[],chrpos%[]);
+        'Do it again
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[],chrpos%[]);
+    endif
+    
+'    if REWRAND% = 1 then
+'        Rand(rewardtimes%[],rewtmst%-(25/SeqStepMS),25/SeqStepMS);     'Generate random array between 25 msec and rewtm msec
+'    endif
+    
+    'Generate Paramtable
+    ArrConst(ParamTable%[0*TABLELENGTH%:TABLELENGTH%],startH%[]);
+    ArrConst(ParamTable%[1*TABLELENGTH%:TABLELENGTH%],endH%[]);
+    ArrConst(ParamTable%[2*TABLELENGTH%:TABLELENGTH%],startV%[]);
+    ArrConst(ParamTable%[3*TABLELENGTH%:TABLELENGTH%],endV%[]);
+    ArrConst(ParamTable%[4*TABLELENGTH%:TABLELENGTH%],holdtimes%[]);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    ArrConst(ParamTable%[6*TABLELENGTH%:TABLELENGTH%],markers%[]);
+	ArrConst(ParamTable%[7*TABLELENGTH%:TABLELENGTH%],fixtmst%);    'Use scalar, since we don't need to randomize fix time
+    ArrConst(ParamTable%[8*TABLELENGTH%:TABLELENGTH%],chrpos%[]);
+    
+    'This code overrides the instructions above that fill reward times into ParamTable
+    smrew%:=screwtm%;
+    MakeRandRewArray%(rewardtimes%[],smrew%/SeqStepMS,bgrew%/SeqStepMS,bgrewpcnt%);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    
+    if BUG% then
+        ClearLog%();
+        for i%:=0 to len(ParamTable%[])-1 do
+            PrintLog("ParamTable %d: %d\n",i%,ParamTable%[i%]);
+        next
+        
+        yield();
+    endif
+    
+    TASK%:=5;       'VORC
+    oldtTask$:=tTask$;
+    tTask$:="Sine VORC, "+"Pos="+Str$(scChrPos%)+", Freq="+Str$(scChrFreq)+", Offset=" +Str$(scLzOffset)+", Type="+Str$(scCOND%);;
+    
+    if P1401% and serialOpen% then          'If we are sampling and talking to kollmorgen controller
+        Pause%();       'pause task to pass variables to sequencer
+   
+        'Pass everything to sequencer
+        SampleSeqVar(seqRewDly%,rewdlyst%);
+        SampleSeqVar(seqITIA%,ITIst%);					'set ITI variable in sequencer
+        SampleSeqVar(seqITIB%,ITIBst%);					'set 2nd ITI variable in sequencer
+        SampleSeqVar(seqTASK%,TASK%);			'4=sine cancel, 7=VORd
+        
+        if scCOND%=1 then
+            SampleSeqVar(seqOKSLTON%,1);
+        else
+            SampleSeqVar(seqOKSLTON%,0);
+        endif
+        
+        SampleSeqVar(seqLZON%,1);
+        
+        SampleSeqVar(seqEYE%,EYE%);         'if eye mode updated by dialog, need to send to sequencer
+        SampleSeqVar(seqTkWinSz%,tkwinbits%);
+        SampleSeqVar(seqFxWinSz%,fxwinbits%);
+        SampleSeqVar(seqDlyst%,purdlyst%);
+        SampleSeqVar(seqFreq%,chrfreqst%);
+        SampleSeqVar(seqHLzvel%,Hlzvelbits%);
+        SampleSeqVar(seqVLzvel%,Vlzvelbits%);
+        SampleSeqVar(seqChrvel%,chrvelbits%);
+        
+        SampleSeqVar(seqIndex%,0);          'Reset table index
+        SampleSeqTable(ParamTable%[]);
+        
+        'Wait to make sure motors are stopped before talking to motor controllers
+        var chrpos1,chrpos2,drmpos1,drmpos2;
+        
+        repeat
+            view(vh%);        
+            'Get value of chair and drum channels now
+            chrpos1:=ChanValue(CHRCHAN%,MaxTime(CHRCHAN%));
+            drmpos1:=ChanValue(DRMCHAN%,MaxTime(DRMCHAN%));
+            yield(0.5); 'Wait a half second
+            'Get new values of chair and drum channels
+            chrpos2:=ChanValue(CHRCHAN%,MaxTime(CHRCHAN%));
+            drmpos2:=ChanValue(DRMCHAN%,MaxTime(DRMCHAN%));
+        until (abs(chrpos2-chrpos1) < 0.5) AND (abs(drmpos2-drmpos1) < 0.5);    'loop until drum and chair haven't moved more than half a degree in half a second
+        
+        'Send commands to kollmorgen contollers
+        SerialWrite(KMGNSERIALPORT%,initst$);
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,cinitst$);
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,dinitst$);		
+        yield(0.1);
+        
+        SerialWrite(KMGNSERIALPORT%,"\\1\rGEARI " + str$(chrgeari%) + "\r");		
+		yield(0.1);
+		SerialWrite(KMGNSERIALPORT%,"\\1\rGEARO " + str$(chrgearo%) + "\r");
+		yield(0.1);
+        
+        'Use same gear ratios for chair and drum
+        SerialWrite(KMGNSERIALPORT%,"\\2\rGEARI " + str$(chrgeari%) + "\r");	
+		yield(0.1);
+		SerialWrite(KMGNSERIALPORT%,"\\2\rGEARO " + str$(chrgearo%) + "\r");
+		yield(0.1);
+
+    
+        SerialWrite(KMGNSERIALPORT%,"\\2\rOPMODE 8\r");
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,"\\2\rGEAR 0\r");
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,"\\2\rDIR 1 0 0\r");  
+        yield(0.1);
+      
+        
+        SerialWrite(KMGNSERIALPORT%,cenablest$);        'endable chair
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,denablest$);        'disable drum
+        yield(0.1);
+        
+        yield(0.1);		'Wait 100 ms to make sure variables received
+        Start%();       'Now start it back up
+    endif
+    
+endif
+
+return 1;
+end
+
+func SOKS%()
+
+const DRMPEAKVOLTS:=1.071;      'Use 1.071 V amplitude sinusoid for position command; GEARI scales up
+'Was 1.029 prior to 11/18/2010
+'1V = 204.8 encoder counts; 65536 encoder counts = 360 degrees, hence 1 V = 1.125 degrees and 1 degree = 889 mV
+
+var ok%;
+var i%:=1;
+var j%:=1;
+var k%,m%;
+
+var mark%:=74;       'Base mark (k is added to it to give all directions)
+'!!!!!!!! NOTE: Need to change this!!!!!!!!!!!!!!!
+
+var holdtmst%;		'Hold time in sequencer steps (counter)
+var ITIst%;			'ITI in sequencer steps
+var ITIBst%;		'2nd ITI in sequencer steps
+var rewdlyst%;		'Reward delay time in sequencer steps
+var rewtmst%;		'Reward time in sequencer steps
+var fixtmst%;	'Fix time in sequencer steps--one for fixation (because decremented in sequencer)
+var purdlyst%;
+
+var tmprandholdtm%[TABLELENGTH%];    'For generating random holdtime to add to base holdtime array
+var randholdtmst%[TABLELENGTH%];		'...in sequencer steps (counter)
+
+var Hlzposbits%, Vlzposbits%;
+var sH%,eH%,sV%,eV%;
+var tkwinbits%,fxwinbits%;
+
+var drmvelbits%;
+var drmposbits%;    ' drmposbits is constant, corresponding to full amplitude sine wave
+var drmfreqst%;
+var drmgeari%:=1;       'Ratio of geari/gearo determines gain of ANIN for position command
+var drmgearo%:=1;
+
+var initst$, cinitst$, dinitst$;       'Strings to send to kollmorgen controller
+var cenablest$,denablest$;              'Strings to enable/disable chair and drum
+
+var numpositions%,n%,r%;
+'Arrays used to load paramtable%
+var tmp[TABLELENGTH%];		            'array used for random permutation
+var startH%[TABLELENGTH%];				'starting position of horizontal laser
+var endH%[TABLELENGTH%];				'ending position of horizontal laser
+var startV%[TABLELENGTH%];				'starting position of vertical laser
+var endV%[TABLELENGTH%];				'ending position of vertical laser
+var holdtimes%[TABLELENGTH%];			'fixed or randomized
+var rewardtimes%[TABLELENGTH%];		'fixed or biased
+var markers%[TABLELENGTH%];         'In decimal
+'New in version 7.3
+var drmpos%[TABLELENGTH%];          'Position displacement of drum
+
+'Arrays to determine laser direction
+var Hdirs%[5],Vdirs%[5];
+
+Hdirs%[0]:=0;
+Hdirs%[1]:=-1;
+Hdirs%[2]:=0;
+Hdirs%[3]:=1;
+Hdirs%[4]:=0;
+
+Vdirs%[0]:=1;
+Vdirs%[1]:=0;
+Vdirs%[2]:=0;
+Vdirs%[3]:=0;
+Vdirs%[4]:=-1;
+
+DlgCreate("Sine OKS Parameters (RUN will run task)",0,0,70,24);
+DlgInteger(i%,"ITI and Bad Timeout (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",1,100000,48,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Fix time before VORC starts (ms)",1,100000,33,j%); i%+=1; j%+=1;
+DlgInteger(i%,"&Hold time Base and Random (ms)",1,100000,33,j%); i%+=1;
+DlgInteger(i%,"",0,50000,48,j%); i%+=1; j%+=2;
+DlgInteger(i%,"&Reward Time and Delay (ms)",1,10000,33,j%); i%+=1;
+DlgInteger(i%,"",1,10000,48,j%); i%+=1; j%+=2;
+DlgInteger(i%,"Drum &distance from center",1,90,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Drum peak velocity",0.0,100.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Drum movement &frequency",0.01,10.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Target eccentric &offset",0.0,30.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"Initial window size for fixation",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgReal(i%,"&Window size for visual following",0.1,100.0,40,j%); i%+=1; j%+=1;
+DlgInteger(i%,"Delay before EIW check (ms)",1,10000,40,j%); i%+=1; j%+=2;
+DlgList(i%,"Trial ordering","Block|Random",2,15,j%); i%+=1; j%+=1;
+DlgList(i%,"Monkey interaction mode","EyeTrial|EyeContinuous",2,25,j%); i%+=1; j%+=1;
+DlgList(i%,"OKS condition","OKSonly|OKSlaser",2,25,j%); i%+=1;j%+=2;
+DlgText("Fixation positions to use",27,j%); j%+=1;
+DlgCheck(i%,"",35,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",30,j%); i%+=1;
+DlgCheck(i%,"",35,j%); i%+=1;
+DlgCheck(i%,"",40,j%); i%+=1; j%+=1;
+DlgCheck(i%,"",35,j%); j%+=1;
+
+DlgAllow(ALLOWED%,IdleProc%,scCalcVel%);
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"RUN|0x0d");
+DlgButton(2,"Save|0x20");
+ok%:=DlgShow(soITI%,soITIB%,sofixtm%,soholdtm%,sorandholdtm%,sorewtm%,rewdly%,soDrmPos%,soDrmVel,soDrmFreq,soLzPos,soFxwinsz,soTkwinsz,sodelayeiw%,soRAND%,EYE%,soCOND%,sodirs%[]);
+
+if ok%=1 then  'If user selects OK and we are sampling, generate task and send to sequencer
+    
+    if EYE% = 0 then
+        ok%:=Query("Reality Check|Are you SURE you want to use trial mode?","Use trial mode","Use continuous mode");
+        if ok%=0 then
+            EYE%:=1;
+        endif
+    endif    
+    
+    if sorewtm% >= 1000 then
+        Message("Reward size of " + Str$(sorewtm%) + " is rather large.  Make sure you didn't accidently type an extra zero.\n" + 
+        "                              NOTE: You'll need to correct the value yourself.");
+    endif
+        
+    'Check if serial port open to kollmorgen and if not try to open
+    if not serialOpen% then SerOpen%(); endif
+    
+    'First figure out how many different positions we need to put in table
+    numpositions%:=ArrSum(sodirs%[]);
+    if numpositions% = 0 then Message("You must choose at least one position.\nTask not started!"); return 1; endif
+    n%:=Trunc(TABLELENGTH%/numpositions%);      'Get whole number of times to repeat positions
+    r%:=TABLELENGTH% mod numpositions%;         'Get remaining spaces left in array
+    
+    Hlzposbits%:=Round(soLzPos*BitsPerHLzDeg);      '32-bit for DAC
+    Vlzposbits%:=Round(soLzPos*BitsPerVLzDeg);
+    ''''''''NEED TO DO ERROR CHECKING TO MAKE SURE WE DON'T GO OUT OF RANGE OF LASERS'''''''''
+    
+    ''''''''Calculate frequency here based on steps per ms''''''''
+    drmfreqst%:=soDrmFreq*pow(2,32)*SeqStepMS/1000;	'degrees per step (divide by 1000 b/c need units in Hz)
+    drmposbits%:=Round(DRMPEAKVOLTS*SEQBITSPERVOLT); 'output is 1 degree with GEARI=1
+    
+    drmvelbits%:=Round((drmposbits%*65536)/(500/SeqStepMS)); 'Reach peak position in 500 ms
+    
+    drmgeari%:=soDrmPos%*27;
+    
+    initst$:=Print$("\\*\rDIS\rOPMODE h%.2x\rUNITS h%.2x\rPCMDMODE h%.2x\r",8,0,1);  '35 chars
+	cinitst$:=Print$("\\1\rBW h%.2x\rTF h%.2x\rACC h%.2x\rDEC h%.2x\r",12,50,67,67);  '~30 chars
+    dinitst$:=Print$("\\2\rBW h%.2x\rTF h%.2x\rACC h%.2x\rDEC h%.2x\r",12,75,67,67);	'~30 chars
+    
+    cenablest$:="\\1\rDIS\r";	'Enable chair (just in case!!!)
+	denablest$:="\\2\rEN\r"; 	'Disable drum
+    
+    yield();
+        
+    sH%:=Hlzposbits%;
+    eH%:=Hlzposbits%;
+    sV%:=Vlzposbits%;
+    eV%:=Vlzposbits%;
+    
+    rewdlyst%:=rewdly%/SeqStepMS;					'Convert time in ms to sequencer steps
+    rewtmst%:=sorewtm%/SeqStepMS;					'Convert time in ms to sequencer steps  
+    fixtmst%:=sofixtm%/SeqStepMS/StepsPerEIWLoop;					'Divide by StepsPerEIWLoop because StepsPerEIWLoop steps occupy one loop    
+    holdtmst%:=soholdtm%/SeqStepMS/StepsPerEIWLoop;			'Divide by StepsPerEIWLoop because StepsPerEIWLoop steps occupy one loop
+    purdlyst%:=sodelayeiw%/SeqStepMS/StepsPerEIWLoop;
+    
+    ITIst%:=soITI%/SeqStepMS;							'Convert time in ms to sequencer steps
+    ITIBst%:=soITIB%/SeqStepMS;							'Convert time in ms to sequencer steps
+    
+    tkwinsz:=soTkwinsz;                      'Set globally
+    tkwinbits%:=6553.6*(tkwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    fxwinsz:=soFxwinsz;                      'Set globally
+    fxwinbits%:=6553.6*(fxwinsz/HLzScale);		'H and V window calibration is same --> assumes H and V laser scale are equal.
+    
+    Rand(tmprandholdtm%[],sorandholdtm%);
+    ArrConst(randholdtmst%[],tmprandholdtm%[]);
+    ArrDiv(randholdtmst%[],SeqStepMS);      'Divide in two steps or else get integer truncation
+    ArrDiv(randholdtmst%[],StepsPerEIWLoop);
+    
+    'Now loop through for each position and assign values to table
+    m%:=0;
+    for k%:=0 to Len(sodirs%[])-1 do
+        if sodirs%[k%] = 1 then
+            fillarray%(startH%[],Hdirs%[k%]*sH%,m%*n%,m%*n%+n%-1);
+            fillarray%(endH%[],Hdirs%[k%]*eH%,m%*n%,m%*n%+n%-1);
+            fillarray%(startV%[],Vdirs%[k%]*sV%,m%*n%,m%*n%+n%-1);
+            fillarray%(endV%[],Vdirs%[k%]*eV%,m%*n%,m%*n%+n%-1);
+            fillarray%(holdtimes%[],holdtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(rewardtimes%[],rewtmst%,m%*n%,m%*n%+n%-1);
+            fillarray%(markers%[],mark%+k%,m%*n%,m%*n%+n%-1);
+            fillarray%(drmpos%[],drmposbits%,m%*n%,m%*n%+n%-1);       'Output full +/-5V for sine
+            
+            m%+=1;       'Advance counter to fill next group of values            
+        endif
+    next
+    
+    'Fill in remaining spaces of array (just use last r% values, since r% will be pretty small)
+    if r%>0 then
+        for k%:=1 to r% do    
+            startH%[TABLELENGTH%-k%]:=startH%[TABLELENGTH%-r%-k%];
+            endH%[TABLELENGTH%-k%]:=endH%[TABLELENGTH%-r%-k%];
+            startV%[TABLELENGTH%-k%]:=startV%[TABLELENGTH%-r%-k%];
+            endV%[TABLELENGTH%-k%]:=endV%[TABLELENGTH%-r%-k%];
+            holdtimes%[TABLELENGTH%-k%]:=holdtimes%[TABLELENGTH%-r%-k%];
+            rewardtimes%[TABLELENGTH%-k%]:=rewardtimes%[TABLELENGTH%-r%-k%];
+            markers%[TABLELENGTH%-k%]:=markers%[TABLELENGTH%-r%-k%];
+            drmpos%[TABLELENGTH%-k%]:=drmpos%[TABLELENGTH%-r%-k%];
+        next
+    endif
+    
+    'Add random times to base hold times
+    ArrAdd(holdtimes%[],randholdtmst%[]);
+    
+    if soRAND% = 1 then
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[],drmpos%[]);
+        'Do it again
+        Rand(tmp[]);
+        'Generate random permutation based on sort of tmp[] (see ArrSort() help)
+        ArrSort(tmp[],0,startH%[],endH%[],startV%[],endV%[],holdtimes%[],rewardtimes%[],markers%[],drmpos%[]);
+    endif
+    
+'    if REWRAND% = 1 then
+'        Rand(rewardtimes%[],rewtmst%-(25/SeqStepMS),25/SeqStepMS);     'Generate random array between 25 msec and rewtm msec
+'    endif
+    
+    'Generate Paramtable
+    ArrConst(ParamTable%[0*TABLELENGTH%:TABLELENGTH%],startH%[]);
+    ArrConst(ParamTable%[1*TABLELENGTH%:TABLELENGTH%],endH%[]);
+    ArrConst(ParamTable%[2*TABLELENGTH%:TABLELENGTH%],startV%[]);
+    ArrConst(ParamTable%[3*TABLELENGTH%:TABLELENGTH%],endV%[]);
+    ArrConst(ParamTable%[4*TABLELENGTH%:TABLELENGTH%],holdtimes%[]);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    ArrConst(ParamTable%[6*TABLELENGTH%:TABLELENGTH%],markers%[]);
+	ArrConst(ParamTable%[7*TABLELENGTH%:TABLELENGTH%],fixtmst%);    'Use scalar, since we don't need to randomize fix time
+    ArrConst(ParamTable%[8*TABLELENGTH%:TABLELENGTH%],drmpos%[]);
+    
+    'This code overrides the instructions above that fill reward times into ParamTable
+    smrew%:=sorewtm%;
+    MakeRandRewArray%(rewardtimes%[],smrew%/SeqStepMS,bgrew%/SeqStepMS,bgrewpcnt%);
+    ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+    
+    if BUG% then
+        ClearLog%();
+        for i%:=0 to len(ParamTable%[])-1 do
+            PrintLog("ParamTable %d: %d\n",i%,ParamTable%[i%]);
+        next
+        
+        yield();
+    endif
+    
+    TASK%:=6;
+    oldtTask$:=tTask$;
+    tTask$:="Sine OKS, "+"Pos="+Str$(soDrmPos%)+", Freq="+Str$(soDrmFreq)+", Offset=" +Str$(soLzPos)+", Type="+Str$(soCOND%);
+    
+    if P1401% and serialOpen% then          'If we are sampling and talking to kollmorgen controller
+        Pause%();       'pause task to pass variables to sequencer
+     
+        'Pass everything to sequencer
+        SampleSeqVar(seqRewDly%,rewdlyst%);
+        SampleSeqVar(seqITIA%,ITIst%);					'set ITI variable in sequencer
+        SampleSeqVar(seqITIB%,ITIBst%);					'set 2nd ITI variable in sequencer
+        SampleSeqVar(seqTASK%,TASK%);			'4=sine cancel, 7=VORd
+        
+        if soCOND%=1 then
+            SampleSeqVar(seqLZON%,1);
+        else
+            SampleSeqVar(seqLZON%,0);
+        endif
+        
+        SampleSeqVar(seqEYE%,EYE%);         'if eye mode updated by dialog, need to send to sequencer
+        SampleSeqVar(seqTkWinSz%,tkwinbits%);
+        SampleSeqVar(seqFxWinSz%,fxwinbits%);
+        SampleSeqVar(seqDlyst%,purdlyst%);
+        SampleSeqVar(seqFreq%,drmfreqst%);
+        SampleSeqVar(seqChrvel%,drmvelbits%);
+        
+        SampleSeqVar(seqIndex%,0);          'Reset table index
+        SampleSeqTable(ParamTable%[]);
+        
+        'Send commands to kollmorgen contollers
+        SerialWrite(KMGNSERIALPORT%,initst$);
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,cinitst$);
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,dinitst$);		
+        yield(0.1);
+        
+        SerialWrite(KMGNSERIALPORT%,"\\2\rGEARI " + str$(drmgeari%) + "\r");		
+		yield(0.1);
+		SerialWrite(KMGNSERIALPORT%,"\\2\rGEARO " + str$(drmgearo%) + "\r");
+		yield(0.1);
+        
+        SerialWrite(KMGNSERIALPORT%,"\\2\rOPMODE 8\r");
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,"\\2\rGEAR 0\r");
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,"\\2\rDIR 1 0 0\r");  
+        yield(0.1);
+      
+        
+        SerialWrite(KMGNSERIALPORT%,cenablest$);        'endable chair
+        yield(0.1);
+        SerialWrite(KMGNSERIALPORT%,denablest$);        'disable drum
+        yield(0.1);
+        
+        yield(0.1);		'Wait 100 ms to make sure variables received
+        Start%();       'Now start it back up
+    endif
+    
+endif
+
+return 1;
+end
+
+
+func Params%() 'For fine adjustment of eye parameters and general bar parameters
+var ok%;
+var tmpHScale,tmpHOffset,tmpVScale,tmpVOffset;
+var tmpHcomp,tmpVcomp;
+var Hcross%, Vcross%;       'Integer values to pass to sequencer for crosstalk compensation (scaled by ratio of H to V scale)
+var bkSKIPWT%;				'Backup variable to allow resetting skipwt when in bar mode (since EIW mode uses 10000)
+var tmpbgrew%, tmpbgrewpcnt%;
+var rewardtimes%[TABLELENGTH%];
+
+var rewincst%;  'Reward increment time in sequencer steps
+var gracest%;
+
+tmpHScale:=HEyeScale;
+tmpHOffset:=HEyeOffset;
+tmpVScale:=VEyeScale;
+tmpVOffset:=VEyeOffset;
+
+tmpHcomp:=heyecrossgain;
+tmpVcomp:=veyecrossgain;
+
+tmpbgrew%:=bgrew%;
+tmpbgrewpcnt%:=bgrewpcnt%;
+
+DlgCreate("Eye Parameters");  
+DlgReal(1,"Horizontal scale",-200.0,200.0);
+DlgReal(2,"Horizontal offset",-180.0,180.0);
+DlgReal(3,"Vertical scale",-200.0,200.0);
+DlgReal(4,"Vertical offset",-180.0,180.0);
+DlgList(5,"Monkey interaction mode","EyeTrial|EyeContinuous");
+DlgInteger(6,"Reward increment value (ms--zero disables)",0,1000);
+DlgInteger(7,"Big Reward Value and %",0,1000,25);
+DlgInteger(8,"",0,100,40,7,"0|5|10|15|20|25|40|50|75|100");
+DlgInteger(9,"Grace Period (ms)",0,10000);
+DlgInteger(10,"Eye snake length",1,100000);
+DlgString(11,"Animal name",10,"a-zA-Z0-9",0,0,"achilles|bacchus");
+DlgReal(12,"Horizontal crosstalk %",-10,10);
+DlgReal(13,"Vertical crosstalk %",-10,10);
+
+DlgAllow(ALLOWED%,IdleProc%,checkParams%);
+DlgButton(0,"Cancel|0x1b");
+DlgButton(1,"OK|0x0d");
+
+ok%:=DlgShow(tmpHScale,tmpHOffset,tmpVScale,tmpVOffset,EYE%,rewinctm%,tmpbgrew%,tmpbgrewpcnt%,tGrace%,EyePosDataLen%,MONKNAME$,tmpHcomp,tmpVcomp);
+
+HEyeScale:=tmpHScale;
+HEyeOffset:=tmpHOffset;
+VEyeScale:=tmpVScale;
+VEyeOffset:=tmpVOffset;
+
+heyecrossgain:=tmpHcomp;
+veyecrossgain:=tmpVcomp;
+
+
+if ok% and P1401% then
+
+    ChanScale(HEYECHAN%,1);
+    ChanOffset(HEYECHAN%,0);
+    ChanScale(VEYECHAN%,1);
+    ChanOffset(VEYECHAN%,0);    
+    
+    HEyeScaleConversion:=128*(HEyeScale/HLzScale);		'Ratio of eye scale to laser scale, shifted 7 bits to avoid roundoff errors
+    HEyeOffsetConversion:=(6553.6/HLzScale)*HEyeOffset;			'We assume laser offset is zero so we don't need to take it into account here.
+    VEyeScaleConversion:=128*(VEyeScale/VLzScale);		'Ratio of eye scale to laser scale, shifted 7 bits to avoid roundoff errors
+    VEyeOffsetConversion:=(6553.6/VLzScale)*VEyeOffset;			'We assume laser offset is zero so we don't need to take it into account here.
+    
+    'The crosstalk fractions must be 7 bits larger to prevent roundoff errors and corrected based on ratios of H and V scales
+'    Hcross%:=128*(HEyeScale/VEyeScale)*heyecrossgain;   'crosstalk compensation fraction expressed as 7 bits larger to prevent roundoff errors  
+    '    Vcross%:=128*(VEyeScale/HEyeScale)*veyecrossgain;
+    Hcross%:=128*heyecrossgain;   'crosstalk compensation fraction expressed as 7 bits larger to prevent roundoff errors  
+    Vcross%:=128*veyecrossgain;
+    
+    if BUG% then
+        PrintLog("At t=%5.2f, Eye Parameters are:\nHScale: %3.2f (%d), HOffset: %3.2f (%d), HCrosstalk: %3.2f(%d)\nVScale: %3.2f (%d), VOffset: %3.2f (%d), VCrosstalk: %3.2f(%d)\nWindow size: %3.2f fix,%3.2f task\n",
+            MaxTime(),HEyeScale,HEyeScaleConversion,HEyeOffset,HEyeOffsetConversion,heyecrossgain,Hcross%,VEyeScale,VEyeScaleConversion,VEyeOffset,VEyeOffsetConversion,veyecrossgain,Vcross%,fxwinsz,tkwinsz);
+        yield();
+    endif
+    
+    
+    rewincst%:=rewinctm%/SeqStepMS;
+    gracest%:=tGrace%/SeqStepMS;
+    
+    if tmpbgrew% <> bgrew% or tmpbgrewpcnt% <> bgrewpcnt% then
+        bgrew%:=tmpbgrew%;
+        bgrewpcnt%:=tmpbgrewpcnt%;
+        MakeRandRewArray%(rewardtimes%[],smrew%/SeqStepMS,bgrew%/SeqStepMS,bgrewpcnt%);
+        ArrConst(ParamTable%[5*TABLELENGTH%:TABLELENGTH%],rewardtimes%[]);
+        
+        SampleSeqTable(ParamTable%[]);
+    endif
+        
+    view(XYh%).XYSize(1,-EyePosDataLen%);       'Update eye snake length
+    
+    'Pass updated calibration to sequencer
+    SampleSeqVar(seqHEScale%,HEyeScaleConversion);
+    SampleSeqVar(seqHEOffset%,HEyeOffsetConversion);
+    SampleSeqVar(seqVEScale%,VEyeScaleConversion);
+    SampleSeqVar(seqVEOffset%,VEyeOffsetConversion);
+    SampleSeqVar(seqEYE%,EYE%);
+    SampleSeqVar(seqRewInc%,rewincst%);
+    SampleSeqVar(seqGracePer%,gracest%);
+    SampleSeqVar(seqHcross%,Hcross%);
+    SampleSeqVar(seqVcross%,Vcross%);
+    
+    bkSKIPWT%:=SKIPWT%;
+    if EYE% <= 1 then
+        SKIPWT%:=10000;		'Don't need to wait for bar release when doing eye in window task, so make ridiculously high
+                            '...but SKIPWT has different meaning in sequential saccades (EYE%=2)
+    endif   
+   
+    EnableSacSearch%();
+
+    SampleSeqVar(seqSkipWt%,SKIPWT%);
+    SKIPWT%:=bkSKIPWT%;		'Now reset SKIPWT% so it is remembered for bar mode
+    
+endif
+
+if Hcompeyeposchan% > 0 then    'If crosstalk compensated channels exist, modify them based on currently set crossgain values
+    VirtualChan(Hcompeyeposchan%,Str$(HEyeScale)+"*(Ch("+Str$(HEYECHAN%)+")-"+Str$(heyecrossgain)+"*"+"Ch("+Str$(VEYECHAN%)+"))"+"+"+Str$(HEyeOffset),HEYECHAN%);
+    VirtualChan(Vcompeyeposchan%,Str$(VEyeScale)+"*(Ch("+Str$(VEYECHAN%)+")-"+Str$(veyecrossgain)+"*"+"Ch("+Str$(HEYECHAN%)+"))"+"+"+Str$(VEyeOffset),HEYECHAN%);
+endif
+
+return 1;
+end
+
+func checkParams%(item%)
+var hcg,vcg;    'These are local vars for crosstalk gains
+var ok%;        'Return value for functions returning status code
+
+if item% = 12 OR item% = 13 then
+    hcg:=DlgValue(12);
+    vcg:=DlgValue(13);
+    'Adjust crosstalk accordingly
+    if Hcompeyeposchan% > 0 then    'If crosstalk compensated channels exist, modify them based on currently set crossgain values
+        VirtualChan(Hcompeyeposchan%,Str$(HEyeScale)+"*(Ch("+Str$(HEYECHAN%)+")-"+Str$(heyecrossgain)+"*"+"Ch("+Str$(VEYECHAN%)+"))"+"+"+Str$(HEyeOffset),HEYECHAN%);
+        VirtualChan(Vcompeyeposchan%,Str$(VEyeScale)+"*(Ch("+Str$(VEYECHAN%)+")-"+Str$(veyecrossgain)+"*"+"Ch("+Str$(HEYECHAN%)+"))"+"+"+Str$(VEyeOffset),HEYECHAN%);
+    endif
+endif
+
+if item% = 11 then
+    MONKNAME$:=DlgValue$(11);
+    ok%:=ReadAnimalValuesFromFile%();
+    if ok% then
+        DlgValue(1,HEyeScale);
+        DlgValue(2,HEyeOffset);
+        DlgValue(3,VEyeScale);
+        DlgValue(4,VEyeOffset);
+        DlgValue(12,heyecrossgain);
+        DlgValue(13,veyecrossgain);
+    endif
+endif
+
+return 1;
+end
+
+func NewFile%()
+var SS%:=1;			'1 indicates problem, so must be changed to zero for all to be well
+var ok%;
+var scrvh%,scrwintitle$;   'View handle and window title for active script
+
+scrvh%:=App(3); 'Get view handle for currently running script (the task control program)
+scrwintitle$:=view(scrvh%).WindowTitle$();
+
+if SampleSequencer(SeqFile$)<0 and P1401% then
+    Message("Error locating or loading Sequencer file. Are you using the latest version of the Sequencer file?");
+    halt;
+endif
+
+if P1401% then
+	vh%:=FileNew(0,0);	'New Data file invisible, don't show additional channels from config file
+else vh%:=FileNew(7,0,0.1,1000,100);
+endif
+
+'view(vh%).Window(0,0,70,50);
+view(vh%).Window(0,0,70,100);
+view(vh%).WindowVisible(1);
+view(vh%).YAxisMode(4096);      	'Place axis on right of screen
+view(vh%).XRange(0,30);
+view(vh%).YRange(HEYECHAN%,-eyemax,eyemax);
+view(vh%).YRange(VEYECHAN%,-eyemax,eyemax);
+view(vh%).YRange(HLZCHAN%,-eyemax,eyemax);
+view(vh%).YRange(VLZCHAN%,-eyemax,eyemax);
+view(vh%).YRange(CHRCHAN%,-eyemax,eyemax);
+view(vh%).YRange(DRMCHAN%,-eyemax,eyemax);
+view(vh%).ChanColour(HEYECHAN%,1,16);
+view(vh%).ChanColour(VEYECHAN%,1,16);
+view(vh%).ChanColour(DRMCHAN%,1,17);
+view(vh%).DrawMode(UNITEVENTCHAN%,7,2);		'Draw spike events as IFR
+view(vh%).YRange(UNITEVENTCHAN%,0,600);     '0-600 Hz
+FrontView(vh%);
+
+if P1401% then
+	SS%:=SampleStart();
+    'Write the Script version in two places: file comment and textmark on channel 30
+    SampleText(Print$("The currently running script is %s",scrwintitle$));
+    FileComment$(1,Print$("The currently running script is %s",scrwintitle$));
+    SampleWrite(1);
+	SampleWrite(0,UNITCHAN%);
+    ToolbarSet(writetb%,"NEURON",Unitwrite%);
+    SampleKey("I");     'Initialize sequencer
+    SampleKey("I");     'Initialize sequencer
+    SerOpen%(); 'Open serial port to initialize settings and check for communication
+    if serialOpen% then SerClose%(); endif 'then close it back down for now....
+    OnlineSpikeDiscrimination%();       'Create new mem channel for discriminated spikes
+endif
+
+if SS%=0	then			'All went well
+    now:=0; oldt:=0;
+    last1t:=0; last2t:=0;
+    shorttimers:=0; shorttimere:=0;    
+    Cursor(0,MaxTime());            'Position Cursor 0 
+    CursorVisible(0,0);     'Hide Cursor 0 
+'    CursorNew(MaxTime(),7);            'Position Cursor 7
+'    CursorVisible(7,1);     'Hide Cursor 7 
+'    CursorNew(MaxTime(),8);            'Position Cursor 8
+'    CursorVisible(8,1);     'Hide Cursor 8 
+    CursorNew(MaxTime(),9); 'Position Cursor 9 [Used to find latencies for online processing]
+    CursorVisible(9,0);     'Hide Cursor 9 
+    ToolbarSet(0,"",IdleProc%);
+endif
+
+lh% := LogHandle();
+'view(lh%).Window(0,50,70,70);
+view(lh%).Window(70,50,100,100);
+view(lh%).WindowVisible(1);
+ClearLog%();
+PrintLog(Time$()+"\r");
+
+''NOTE: These windows not currently used b/c no useful processing done to update them
+'r1h% := FileNew(12);		'Create XY channel 1
+'view(r1h%).Window(70,0,100,50);
+'view(r1h%).WindowTitle$("Aligned on Trial Start");
+'view(r1h%).WindowVisible(0);
+'view(r1h%).XYDrawMode(1,1,8);
+'view(r1h%).XYSetChan(0);		'Create new channel
+'view(r1h%).XYDrawMode(2,1,8);
+'view(r1h%).XYColour(1,14);		'Set channel 1 (good trials) to green
+'view(r1h%).XYColour(2,16);		'Set channel 2 (bad trials) to red
+'view(r1h%).ChanTitle$(1,"Good");
+'view(r1h%).ChanTitle$(2,"Bad");
+'view(r1h%).YAxisMode(1+2);
+'
+'r2h% := FileNew(12);		'Create XY channel 2
+'view(r2h%).Window(70,50,100,100);
+'view(r2h%).WindowTitle$("Aligned on Bright ON");
+'view(r2h%).WindowVisible(1);
+'view(r2h%).XYDrawMode(1,1,8);
+'view(r2h%).XYSetChan(0);		'Create new channel
+'view(r2h%).XYDrawMode(2,1,8);
+'view(r2h%).XYColour(1,14);		'Set channel 1 (good trials) to green
+'view(r2h%).XYColour(2,16);		'Set channel 2 (bad trials) to red
+'view(r2h%).ChanTitle$(1,"Good");
+'view(r2h%).ChanTitle$(2,"Bad");
+'view(r2h%).YAxisMode(1+2);
+
+XYh% := FileNew(12);		'Create XY channel 3 (eye XY plot)
+'view(XYh%).Window(70,0,100,50);
+view(XYh%).Window(70,0,100,50);
+view(XYh%).WindowTitle$("Eye position");
+view(XYh%).WindowVisible(1);
+view(XYh%).XYSetChan(0);		'Create second channel --> TkWindow
+view(XYh%).XYSize(1,-EyePosDataLen%);
+view(XYh%).XYSize(2,-4);	'Window box only needs 4 points
+view(XYh%).XYColour(2,14);	'Green
+view(XYh%).XYJoin(2,2);	'Join window box channel to make square
+view(XYh%).XYDrawMode(2,2,0);	'Make box data points invisible
+view(XYh%).XYSetChan(0);		'Create a third channel --> FxWindow
+view(XYh%).XYSize(3,-4);	'Window box only needs 4 points
+view(XYh%).XYColour(3,16);	'Red
+view(XYh%).XYJoin(3,2);	'Join window box channel to make square
+view(XYh%).XYDrawMode(3,2,0);	'Make box data points invisible
+view(XYh%).XYSetChan(0);		'Create a fourth channel --> crosshair
+view(XYh%).XYSize(4,-1);	'Window box only needs 4 points
+view(XYh%).XYColour(4,1);	'Red (black?)
+view(XYh%).XYDrawMode(4,1,2); 'Make it a crosshair (+)
+view(XYh%).XYDrawMode(4,2,15); 'Make it bigger
+view(XYh%).XYSetChan(0);		'Create a fifth channel --> Window center
+view(XYh%).XYSize(5,-1);	'Window center only needs 1 point
+view(XYh%).XYColour(5,1);	'Black
+view(XYh%).XYDrawMode(5,1,2);	'Crosshair (+)
+view(XYh%).XYDrawMode(5,3,2);	'Dashed lines
+view(XYh%).XYDrawMode(5,2,75);	'Make it big
+view(XYh%).XAxisMode(1+2);
+view(XYh%).YAxisMode(1+2);
+
+'errvh% := FileNew(12);		'Create XY channel for rudimentary error rate histogram
+'view(errvh%).Window(0,70,70,100);
+'view(errvh%).WindowTitle$("Percent correct trend");
+'view(errvh%).WindowVisible(1);
+'view(errvh%).XYDrawMode(1,1,4);		'Draw points as circles
+'view(errvh%).YAxisMode(1+2);
+'view(errvh%).XAxisMode(1+2);
+'view(errvh%).XYJoin(1,1);
+'
+if NUMMONITORS%=2 then
+    Monitors2%();
+endif
+
+ToolbarSet(closealltb%,"Stop Sampling",CloseAll%);
+
+view(vh%);
+'Make sure channel calibration is set to units of volts
+ChanScale(HEYECHAN%,1);
+ChanOffset(HEYECHAN%,0);
+ChanScale(VEYECHAN%,1);
+ChanOffset(VEYECHAN%,0);
+
+ChanScale(HLZCHAN%,HLzScale);
+ChanOffset(HLZCHAN%,0);
+ChanScale(VLZCHAN%,VLzScale);
+ChanOffset(VLZCHAN%,0);
+
+'Set up virtual channels for compensated eye positions
+Hcompeyeposchan%:=VirtualChan(0,Str$(HEyeScale)+"*(Ch("+Str$(HEYECHAN%)+")-"+Str$(heyecrossgain)+"*"+"Ch("+Str$(VEYECHAN%)+"))"+"+"+Str$(HEyeOffset),HEYECHAN%);
+Vcompeyeposchan%:=VirtualChan(0,Str$(VEyeScale)+"*(Ch("+Str$(VEYECHAN%)+")-"+Str$(veyecrossgain)+"*"+"Ch("+Str$(HEYECHAN%)+"))"+"+"+Str$(VEyeOffset),HEYECHAN%);
+ChanShow(Hcompeyeposchan%);
+ChanShow(Vcompeyeposchan%);
+ChanTitle$(Hcompeyeposchan%,"Heye virt");
+ChanTitle$(Vcompeyeposchan%,"Veye virt");
+
+view(vh%).YRange(Hcompeyeposchan%,-eyemax,eyemax);
+view(vh%).YRange(Vcompeyeposchan%,-eyemax,eyemax);
+view(vh%).ChanColour(Hcompeyeposchan%,1,16);
+view(vh%).ChanColour(Vcompeyeposchan%,1,16);
+
+'Set up duplicate eye channels, add slope proccess, and create virtual channel of vector sum
+heyedupchan%:=ChanDuplicate(Hcompeyeposchan%); 'Channels should be hidden by default
+veyedupchan%:=ChanDuplicate(Vcompeyeposchan%);
+ChanProcessAdd(heyedupchan%,3,0.005);	'Add slope process to H eye chan [decrease time constant if saccade trigger giving false positives]
+ChanProcessAdd(veyedupchan%,3,0.005);	'Add slope process to V eye chan
+
+eyevectchan%:=VirtualChan(0,"Sqrt(Sqr(Ch("+Str$(heyedupchan%)+"))+Sqr(Ch("+Str$(veyedupchan%)+")))",heyedupchan%);  'Make velocity vector
+view(vh%).YRange(eyevectchan%,0,300);
+
+trialstartchan%:=ChanDuplicate(32);      'Duplicate marker channel for use in searching trial starts
+trialgoodchan%:=ChanDuplicate(32);      'Duplicate marker channel for use in searching good trials ('r')
+trialbadchan%:=ChanDuplicate(32);       'Duplicate channel for bad trials ('x')
+trialrxnchan%:=ChanDuplicate(32);      'Duplicate marker channel for use in searching for bar releases ('u')
+
+MarkMask(trialstartchan%,0,0,-1);			'Turn off all markers
+MarkMask(trialstartchan%,0,1,"!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOP");		'Turn on only trial start marks
+MarkMask(trialgoodchan%,0,0,-1);			'Turn off all markers
+MarkMask(trialgoodchan%,0,1,"r");		'Turn on only trial start marks
+MarkMask(trialbadchan%,0,0,-1);			'Turn off all markers
+MarkMask(trialbadchan%,0,1,"x");		'Turn on only trial start marks
+MarkMask(trialrxnchan%,0,0,-1);			'Turn off all markers
+MarkMask(trialrxnchan%,0,1,"u");		'Turn on only trial start marks
+
+EnableSacSearch%();
+
+'Create new channel for keeping track of latencies on the fly [Must run Process() to populate channel]
+ok%:=MeasureX(102,0,"Cursor(9)");
+if ok%=0 then       'Created fine
+    latencychan%:=MeasureToChan(600,"BhvEvnt",2,14,trialstartchan%,0.0,1);
+    else Message("Measurement channel could not be created");
+endif
+
+view(vh%).ChanOrder(HEYECHAN%,-1,Hcompeyeposchan%);
+view(vh%).ChanOrder(VEYECHAN%,-1,Vcompeyeposchan%);
+view(vh%).ChanOrder(Hcompeyeposchan%,0,HLZCHAN%);
+view(vh%).ChanOrder(Vcompeyeposchan%,0,VLZCHAN%);
+
+view(vh%).ChanHide(HEYECHAN%);
+view(vh%).ChanHide(VEYECHAN%);
+
+ReadAnimalValuesFromFile%();
+Params%();
+FrontView(vh%);
+
+return 1;
+end
+
+func CloseAll%()
+var ok%,SS%,unitdata%;
+var fbasename$,fdataname$,fnewdataname$,flogname$;
+
+SS%:=SampleStatus();
+
+if SS% > 0 then
+    ok%:=Query("Stop sampling/Close file|Are you sure you want to stop sampling and close all views?");
+else
+    ok%:=Query("Close file|Are you sure you want to close all views?");
+endif
+
+if ok% then
+    if SS% > 0 then
+        SampleKey("X"); 
+        SampleStop();
+        DisMotors%();   'Make sure motors are disabled before stopping
+    endif
+    
+    if spikememchan% > 0 then
+        view(vh%);
+        MemSave(spikememchan%,29,0);       'Save spike discrim channel to file
+        ChanShow(29);
+    endif
+    
+    ok%:=Query("Eye Calibration|Do you want to automatically calibrate eye data?");
+    if ok% then
+        ChanScale(HEYECHAN%,HEyeScale);
+        ChanOffset(HEYECHAN%,HEyeOffset);
+        ChanScale(VEYECHAN%,VEyeScale);
+        ChanOffset(VEYECHAN%,VEyeOffset);
+        
+        'If eye is calibrated we can delete virtual channels
+        ok%:=ChanDelete(Hcompeyeposchan%);
+        if ok% then Hcompeyeposchan%:=0; endif
+        ok%:=ChanDelete(Vcompeyeposchan%);
+        if ok% then Vcompeyeposchan%:=0; endif
+    endif
+    
+    'Delete velocity vector virtual channel
+    if eyevectchan% > 0 then
+        ChanDelete(eyevectchan%);
+    endif
+            
+    PrintLog("End time: %s\r",Time$());
+    
+    
+    Message("Good trials|Don't forget to write down the number of good trials: %d/%d",numgood,numtrl);
+    
+    unitdata%:=NextTime(UNITCHAN%,5);  'Look for any data on unit channel after 5 seconds (to skip initial data written upon file open)
+    if unitdata% > 0 then
+        ok%:=Query("Save directory|It looks like you recorded some neuronal data. \n\nWould you like to save the data file in the 'Recording' or 'Behavior' directory?","Recording","Behavior");
+        if ok% = 1 then
+            ROOTDIR$:=ROOTRECDIR$;
+        else
+            ROOTDIR$:=ROOTBEHDIR$;
+        endif
+    endif
+    
+    fbasename$:=Print$("%s",ROOTDIR$+MONKNAME$+"\\"+MONKNAME$+"_"+Date$(2,2,1,3,"-"));
+    fdataname$:=fbasename$ + ".smr";
+    flogname$:=fbasename$ + ".txt";
+    
+    'Save data file and log using same base name
+    ok% := view(vh%).FileSaveAs(fdataname$,-1,0,"Save data file");
+    if ok% = 0 then
+        fnewdataname$:=FileName$(3)+FileName$(4);    'Return everything but extension
+        if not (LCase$(fbasename$)=LCase$(fnewdataname$)) then
+            flogname$:=fnewdataname$+".txt";
+        endif
+        view(lh%).FileSaveAs(flogname$,-1);
+        WriteAnimalValuesToFile%();
+    else
+        'Save file anyway, even if user doesn't ask for it
+        view(vh%).FileSaveAs(fbasename$+"_temp"+Print$("%03.3d",Rand(100,0))+".smr",-1,1);
+    endif    
+        
+    if SS% > 0 then
+        Reset%();        'Reset things for next file
+    endif
+    FileClose(-1,-1);
+    ToolbarSet(0,"");
+    ToolbarSet(newfiletb%,"NEW FILE",NewFile%);
+    ToolbarSet(toggleeyeveltb%,"Show vel",ToggleEyeVel%);
+    Heyevelchan%:=0;
+    Veyevelchan%:=0;
+    spikememchan%:=0;
+endif
+
+return 1;
+end
+
+func IdleProc%()
+var tmp%,tmp1;
+var outcomecode%[4];    'Empty array to hold marker code to distinguish outcome of trial (r or x)
+var rt,ot;              'Time of reaction and outcome on trial
+var rxntime;            'Reaction time relative to trial start
+var r1Ch%;       'XY channel to write raster data to (2=bad, 1=good trials)
+var t;					't=current trig time
+var y0%,y1%;			'Y axis min and max for XY views
+var winX[4],winY[4];	'X and Y values for window corners in XY eye position plot
+var fwinX[4],fwinY[4];	'X and Y values for fixation window corners in XY eye position plot
+var Hlzpos,Vlzpos;	'H and V laser positions for drawing window
+var chrpos;
+var Heyepos,Veyepos;	'H and V eye positions at current time
+var junk%;				'Junk variable for integers
+var PercentCorr, st%, binsz%;
+
+if P1401%  = 0 then return 1; endif
+
+now:=view(vh%).maxtime();
+shorttimers:=view(vh%).maxtime();
+
+
+if (shorttimers-shorttimere) > 0.005 and (Hcompeyeposchan% > 0 or Hcompeyeposchan% > 0) then '200 Hz sampling if virtual channel for eyes exists (new in v. 8.2)
+    
+    'Get laser and eye positions
+    Hlzpos:=view(vh%).ChanValue(HLZCHAN%,shorttimers);
+    Vlzpos:=view(vh%).ChanValue(VLZCHAN%,shorttimers);
+    chrpos:=view(vh%).ChanValue(CHRCHAN%,shorttimers);
+    Hlzpos:=Hlzpos-chrpos;   'Subtract chair position from H laser to get relative laser position
+'    Heyepos:=view(vh%).ChanValue(HEYECHAN%,shorttimers);
+'    Veyepos:=view(vh%).ChanValue(VEYECHAN%,shorttimers);
+    Heyepos:=view(vh%).ChanValue(Hcompeyeposchan%,shorttimers,junk%,3);
+'    if junk%=0 then
+'        Yield();
+'    endif
+    Veyepos:=view(vh%).ChanValue(Vcompeyeposchan%,shorttimers,junk%,3);
+'    if junk%=0 then
+'        Yield();
+'    endif
+    
+    winX[0]:=Hlzpos-tkwinsz;
+    winX[1]:=Hlzpos-tkwinsz;
+    winX[2]:=Hlzpos+tkwinsz;
+    winX[3]:=Hlzpos+tkwinsz;
+    
+    winY[0]:=Vlzpos-tkwinsz;
+    winY[1]:=Vlzpos+tkwinsz;
+    winY[2]:=Vlzpos+tkwinsz;
+    winY[3]:=Vlzpos-tkwinsz;
+    
+    fwinX[0]:=Hlzpos-fxwinsz;
+    fwinX[1]:=Hlzpos-fxwinsz;
+    fwinX[2]:=Hlzpos+fxwinsz;
+    fwinX[3]:=Hlzpos+fxwinsz;
+    
+    fwinY[0]:=Vlzpos-fxwinsz;
+    fwinY[1]:=Vlzpos+fxwinsz;
+    fwinY[2]:=Vlzpos+fxwinsz;
+    fwinY[3]:=Vlzpos-fxwinsz;
+    
+    view(XYh%).XYAddData(1,Heyepos,Veyepos);
+    view(XYh%).XYAddData(2,WinX[],WinY[]);
+    view(XYh%).XYAddData(3,fWinX[],fWinY[]);
+    view(XYh%).XYAddData(4,Heyepos,Veyepos);      'Draw crosshair for current position (old positions are snake)
+    view(XYh%).XYAddData(5,Hlzpos,Vlzpos);          'Draw crosshair for center of window
+    view(XYh%).XRange(view(vh%).YLow(Hcompeyeposchan%),view(vh%).YHigh(Hcompeyeposchan%));
+    view(XYh%).YRange(-1,view(vh%).YLow(Vcompeyeposchan%),view(vh%).YHigh(Vcompeyeposchan%));
+    
+    shorttimere:=shorttimers;
+    
+endif
+
+if (now-oldt) > 0.1 then	'Every 100 milliseconds or so if sampling
+    
+      
+    'Update log file
+    tmp%:=SampleSeqVar(seqNumTrl%);				
+    numgood:=SampleSeqVar(seqNumGood%);
+    var tasknumgood;
+    var tasknumtrl;
+    
+    if tmp% > numtrl then
+        numtrl:=tmp%;
+        tasknumtrl:=numtrl-numtrloffset;
+        tasknumgood:=numgood-numgoodoffset;
+        tmp1:=numgood/numtrl*100.0;
+        if numtrl mod 10 = 0 then
+            PrintLog("Total Trials: %4.0f | Good: %4.0f | %.2f  Percent Correct\r",numtrl,numgood,(numgood/numtrl)*100);    
+            
+            currentrewchecktm:=MaxTime(REWCHAN%);
+            totalRewDur:=totalRewDur+GetCumRewTime(prevrewchecktm,currentrewchecktm);
+            prevrewchecktm:=currentrewchecktm;
+            
+            PrintLog("Total Reward: %d mls\r",totalRewDur*RewMlsPerMS);
+        endif
+        
+        if tasknumtrl > 0 then
+            PrintLog(" Task Trials: %4.0f | Good: %4.0f | %.2f  Percent Correct\r",tasknumtrl,tasknumgood,(tasknumgood/tasknumtrl)*100);
+        endif        
+    endif   
+ 
+    ''''''''''''''''''Update raster and PSTH'''''''''''''''''''''
+    
+    view(vh%);
+    
+    ' All marker codes for trial start: !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOP
+'    t:=CursorSearch(0,0);
+    
+'    if t > 0 then
+'            yield(0.1);
+'    endif
+    
+    while t > 0 do     'Loop until search fails
+        'Cursor 9 searches for reaction times based on type of task
+        Cursor(8,Cursor(0));    'Set Cursor 9 at trial beginning
+'        MarkMask(32,0,0,-1);	'Turn off all markers
+'        MarkMask(32,0,1,"u");	'Turn on only bar release marks
+        rt:=CursorSearch(8,8);    'Search according to Active mode (depends on whether doing bar press, saccades, etc)
+        
+        'Cursor 8 searches for different events on Channel 32
+        Cursor(9,Cursor(0));    'Set Cursor 8 at trial beginning
+'        MarkMask(32,0,0,-1);	'Turn off all markers
+'        MarkMask(32,0,1,"rx");	'Turn on only outcome marks
+        ot:=CursorSearch(9,9);    'Search outcomes
+        
+        if (rt > 0 and ot > 0) or (ot > 0 and rt < 0) then     'If both searches find data or outcome happens before reaction (bad trial)
+            Tindex%:=Tindex%+1;     'Increment trial index counter
+            LastTime(32, ot+0.01,outcomecode%[]);   'Find value of outcome (r or x)
+            
+            if outcomecode%[0] = 114 then       'Good
+                goodTrial%[Tindex%]:=1;	'Update good trial array with 1 (good)
+                r1Ch%:=1;               'Put raster data on Channel 1 (good)
+            else                        'If any other value is returned [should only be 'x']
+                goodTrial%[Tindex%]:=0;	'Update good trial array with 0 (bad)
+                r1Ch%:=2;               'Put raster data on Channel 2 (bad)
+            endif
+            
+            if (ot > 0 and rt < 0) then    'If outcome comes before reaction either the trial was bad or user gave reward early, ending trial
+                rt:=ot;
+            endif
+                        
+            rxntime:=rt-t;      'Calculate reaction time relative to trial start
+'            view(r1h%).XYAddData(r1Ch%, rxntime, Tindex%);		'Add this sweep
+            
+            tmp%:=Tindex%-ERbinsz%;
+            binsz%:=ERbinsz%;
+            if tmp% < 0 then
+                binsz%:=ERbinsz%+tmp%+1;
+            endif
+            st%:=Tindex%-binsz%+1;
+            percentCorr:=(ArrSum(goodTrial%[st%:binsz%])/binsz%)*100.0;
+            
+'            view(errvh%).XYAddData(1,Tindex%,percentCorr);
+            
+            var x0%,x1%;
+            x0%:=Tindex%-100;
+            if x0% < 0 then x0%:=0; endif
+            x1%:=x0%+100;
+            
+'            view(errvh%).XRange(x0%,x1%);
+'            view(errvh%).YRange(1,0,100);
+            
+            y0%:=Tindex%-100;
+            if y0% < 0 then y0%:=0; endif
+            y1%:=Tindex%+50;
+            
+'            view(errvh%).YRange(1,y0%,y1%);
+'            view(errvh%).Draw(-pre1,pre1+post1);
+            last1t:=t;
+            
+            t:=CursorSearch(0,0);
+        else
+            'If trial isn't complete yet, wait until next iteration of this timing loop (currently 500 ms)
+            Cursor(0,Cursor(0)-0.1);    'Reposition Cursor 0 so next search returns current position
+        endif
+        
+    wend 
+    
+    view(vh%);
+    MarkMask(32,0,1,-1);					'Turn all markers on
+    oldt:=now;
+    
+endif
+
+return 1;
+end
+
+func ClearLog%()
+view(lh%).EditSelectAll();
+view(lh%).EditClear();
+return 1;
+end
+
+func Quit%();           'Disabling the toolbar seems to abort the script; nice side effect for quitting :)
+if SampleStatus()>=0 then 
+'    if Query("Sampling. Do you really want to quit?","Quit","Continue")=1 then
+'        return 0;          'Cancel the toolbar
+'    else
+'        return 1;
+'    endif
+    Message("Hey space cadet, why are you trying to quit the program?!\nYou have to stop sampling before you can quit!");
+    return 1;
+    
+else return 0;
+endif
+' 	ToolbarEnable(-1,0);	 'This is used to quit because negating button number as escape is fucked up as of version 4.12
+'  	return 0;  'toolbar not active
+end
+
+
+func AddRastSweep(rCh%,xyCh%,y,sTime,eTime,tTime)	'time view channel with data, sweep #, start, end, trigger
+var n%, i%, h%;
+n% := view(vh%).Count(rCh%,sTime,eTime);	'See how many points to add
+h%:=view();
+
+'	PrintLog("\rView: %d, n=%d | Pre=%6.2f | Post=%6.2f | Now=%6.2f",h%,n%,sTime,eTime,now);
+
+if n%>0 then
+    var times[n%];
+    view(vh%).ChanData(rCh%,times[],sTime,eTime);  'Get data
+    ArrSub(times[],tTime);		'normalize event times to trigger time
+    'for i% := 0 to n%-1 do
+    XYAddData(xyCh%, times[0], y);		'Only add first event found in sweep
+    'next
+endif
+return n%;
+end
+
+func EnableSacSearch%()
+'Configure active cursors and duplicate marker channel to search for saccades
+View(vh%);
+
+'Full mask for all trial starts is: !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOP
+MarkMask(trialstartchan%,0,0,-1);			'Turn off all markers
+MarkMask(trialstartchan%,0,1,"*+,-./012");		'Turn on only trial start marks
+
+CursorActive(0,14,trialstartchan%,0,"","",1);    'Make cursor 0 search for data points
+
+'Set cursor 9 to find peaks within a max latency from target appearance, only if above a threshold value
+CursorActive(9,4,eyevectchan%,"Cursor(0)","Cursor(0)+"+Str$(sacmaxdelay),"",sacthresh); 'Look up to 5 seconds away
+
+'Set cursor 9 to find trial outcome codes (r or x) [channel to search needs to have appropriate Marker Mask set]
+'CursorActive(9,14,trialoutcomechan%,"Cursor(0)","Cursor(0)+10","",1);   'Set to search up to 5 seconds after Cursor 0 [may need to change]
+
+View(vh%).ProcessAuto(0.5,0,0,0,5.0,latencychan%);    'Process MeasureToChan() with 5 second leeway
+
+return 1;       'Consider returning something more useful, such as start position of cursor 0
+end
+
+func EnableBarSearch%()
+'Configure active cursors and duplicate marker channel to search for bar releases
+View(vh%);
+
+'Full mask for all trial starts is: !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOP
+MarkMask(trialstartchan%,0,0,-1);			'Turn off all markers
+MarkMask(trialstartchan%,0,1,"!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOP");	'Turn on only trial start marks
+
+CursorActive(0,14,trialstartchan%,0,"","",1);    'Make cursor 0 search for data points
+
+'Set cursor 9 to find bar releases [channel to search needs to have appropriate Marker Mask set]
+'CursorActive(8,14,trialrxnchan%,"Cursor(0)","Cursor(0)+10","",1); 
+
+'Set cursor 8 to find outcomes (r or x) [channel to search needs to have appropriate Marker Mask set]
+'CursorActive(9,14,trialoutcomechan%,"Cursor(0)","Cursor(0)+10","",1);   'Set to search up to 5 seconds after Cursor 0 [may need to change]
+
+return 1;       'Consider returning something more useful, such as start position of cursor 0
+end
+
+func deg2rad(deg)
+var rad;
+
+rad:=deg*(PI/180);
+
+return rad;
+end
+
+func rad2deg(rad)
+var deg;
+
+deg:=rad*(180/PI);
+
+return deg;
+end
+
+func MakeRandRewArray%(&rewarray%[],sm%,bg%,bgpcnt%)
+var numbg%;
+var array%[20];
+var tmp[20];
+var i%,j%;
+
+numbg%:=20*(bgpcnt%/100.0);
+
+for i%:=0 to 5-1 do
+    
+    if numbg%>0 then
+        for j%:=0 to numbg%-1 do
+        array%[j%]:=bg%;
+        next
+    endif
+    
+    if numbg%<20 then
+        for j%:=numbg% to 20-1 do
+        array%[j%]:=sm%;
+        next
+    endif
+        
+    Rand(tmp[]);
+    ArrSort(tmp[],0,array%[]);
+    ArrConst(rewarray%[20*i%:20],array%[]);
+'    rewarray%[20*i%:20]:=array%[0:20];
+next
+
+return 1;
+end
+
+func GetCumRewTime(startt,endt)
+
+var t,result,value;
+
+view(vh%);
+
+if ChanKind(REWCHAN%) = 4 then
+    repeat
+        t:=NextTime(REWCHAN%,startt,value);
+        if t>endt or t=-1  then
+            return result;
+        endif
+        result+=(t-startt)*value;
+        startt:=t;
+    until 0;
+    
+'    result+=(endt-startt)*value;
+endif
+
+return result;
+
+end
+
+func CalcPossPos%(item%)
+' Call back function that calls the calculation for the range of eye movement
+var rangemin;
+var rangemax;
+var winsize;
+var percover;
+var tmpstring$;
+var tmpstring2$;
+var tmpstring3$;
+
+if item%=0 or item%=7 or item%=8 or item%=13 or item%=16 or item%=18 then
+'    rangemin:=DlgValue(7)/1000*DlgValue(16)+DlgValue(13); '(time moving while fixating * lazer vel)+pos
+    '    rangemax:=(DlgValue(7)/1000+DlgValue(8)/1000)*DlgValue(16)+DlgValue(13);
+    rangemin:=DlgValue(7)/1000*DlgValue(16); '(time moving while fixating * lazer vel)+pos
+    rangemax:=(DlgValue(7)/1000+DlgValue(8)/1000)*DlgValue(16);
+    winsize:=DlgValue(18)*2;
+'    DlgValue(30, rangemin);
+'    DlgValue(31, rangemax);
+    if (rangemax-rangemin)>0 then
+        percover:=winsize/(rangemax-rangemin)*100;
+    else 
+            percover:=0;
+    endif
+    
+    tmpstring$:=print$("perc overlap ");
+    tmpstring2$:=print$("%3.1f",percover);
+    tmpstring3$:=tmpstring$+tmpstring2$;
+    
+    prdRangeText$:=Print$("Target laser will be intercepted in range of %2.1f to %2.1f degrees from laser start.\nPercent overlap with window: %3.1f",rangemin,rangemax,percover);
+    
+    if item% > 0 then   'Only update text field if dialog already open, otherwise just set global variable
+        DlgValue$(prdRangeTextID%,prdRangeText$);
+    endif
+    
+endif
+
+return 1;
+end
