@@ -10,7 +10,7 @@ Copyright &copy; 2003 Shane Heiney
 Requirements
 ------------
 
-* Windows XP/7/8. 
+* Windows XP/7/8/10. 
 * Cambridge Electronic Design (CED) data acquisition system, including Spike2 version 6 or greater and a Power1401.
 * Mirror galvo system (+/- 5 V) with laser and laser driver to control brightness with digital inputs. 
 * Two Kollmorgen servo motors (for optokinetic drum and vestibular table). 
