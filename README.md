@@ -1,7 +1,7 @@
 MonkeyTrack
 ===========
 
-Monkey oculomotor task control program for [CED Spike2 and Power1401 system](http://ced.co.uk/indexu.shtml) that is currently in use in the laboratory of [Pablo Blazquez](http://vor.wustl.edu/) at Washington University School of Medicine. This is a very mature program that is used for all experiments performed in the lab. It is currently maintained by Dr. Blazquez. 
+Monkey oculomotor task control program for [CED Spike2 and Power1401 system](http://ced.co.uk/indexu.shtml) that is currently in use in the laboratory of [Pablo Blazquez](https://oto.wustl.edu/people/pablo-blazquez-phd/) at Washington University School of Medicine. This is a very mature program that is used for all experiments performed in the lab. It is currently maintained by Dr. Blazquez. 
 
 IMPORTANT: Please note that the requirements to use the software as-is are very specific so it is unlikely that you will be able to run the code out-of-the-box. Therefore the code is mostly provided for reference if you wish to develop your own oculomotor task control system with CED hardware. If the code helps you please consider acknowledging the Blazquez Lab or citing [my dissertation](http://openscholarship.wustl.edu/etd/144/), which contains a section about the software in Chapter 2. 
 
